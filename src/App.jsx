@@ -1,80 +1,277 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { Database, Plus, Trash2, LayoutGrid, Monitor, Eye, EyeOff, CheckSquare, Square, PanelLeftClose, PanelLeft, Columns } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Trash2, Activity, Plus, Search, X, FlaskConical, LogOut } from 'lucide-react';
 import { useMarketData } from './hooks/useMarketData';
 import MonitorDashboard from './components/MonitorDashboard';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import logo from '/Doc1-removebg-preview.png';
+import stocksData from './stocks_nsecm.json';
+import contractsData from './contracts_nsefo.json';
+import { useAuth, buildWsCredential } from './auth/AuthContext';
+import LoginPage from './auth/LoginPage';
 
 function cn(...inputs) {
     return twMerge(clsx(inputs));
 }
 
+// Default stocks already shown in the columns. Listed here so the dropdown can
+// hide them and only offer truly "extra" symbols.
+const DEFAULT_SYMBOLS = new Set([
+    'RELIANCE', 'HDFCBANK', 'ICICIBANK', 'BHARTIARTL', 'INFY', 'SBIN',
+]);
+
+// NIFTY 50 constituents (NSE symbols). Verified against Wikipedia / Dhan
+// (cross-checked Dec 2025 / Apr 2026). The Add-Stock dropdown is restricted
+// to these — tokens come from `stocks_nsecm.json` lookup. Update this list
+// when the index re-balances.
+//
+// Recent (post-Oct 2025) ticker renames to be aware of:
+//   ZOMATO     → ETERNAL  (parent renamed Eternal Limited)
+//   TATAMOTORS → TMPV     (post-demerger; passenger-vehicle entity stays in NIFTY 50)
+const NIFTY_50 = [
+    'ADANIENT', 'ADANIPORTS', 'APOLLOHOSP', 'ASIANPAINT', 'AXISBANK',
+    'BAJAJ-AUTO', 'BAJFINANCE', 'BAJAJFINSV', 'BEL', 'BHARTIARTL',
+    'CIPLA', 'COALINDIA', 'DRREDDY', 'EICHERMOT', 'ETERNAL',
+    'GRASIM', 'HCLTECH', 'HDFCBANK', 'HDFCLIFE', 'HINDALCO',
+    'HINDUNILVR', 'ICICIBANK', 'INDIGO', 'INFY', 'ITC',
+    'JIOFIN', 'JSWSTEEL', 'KOTAKBANK', 'LT', 'M&M',
+    'MARUTI', 'MAXHEALTH', 'NESTLEIND', 'NTPC', 'ONGC',
+    'POWERGRID', 'RELIANCE', 'SBILIFE', 'SHRIRAMFIN', 'SBIN',
+    'SUNPHARMA', 'TCS', 'TATACONSUM', 'TMPV', 'TATASTEEL',
+    'TECHM', 'TITAN', 'TRENT', 'ULTRACEMCO', 'WIPRO',
+];
+
+const BUCKET_OPTIONS = [
+    { value: 1,  label: '1m'  },
+    { value: 2,  label: '2m'  },
+    { value: 3,  label: '3m'  },
+    { value: 4,  label: '4m'  },
+    { value: 5,  label: '5m'  },
+    { value: 10, label: '10m' },
+    { value: 15, label: '15m' },
+    { value: 30, label: '30m' },
+    { value: 45, label: '45m' },
+    { value: 60, label: '60m' },
+];
+
+const VOLUME_UNIT_OPTIONS = [
+    { value: 'auto', label: 'Auto' },
+    { value: 'K',    label: 'K'    },
+    { value: 'L',    label: 'L'    },
+    { value: 'Cr',   label: 'Cr'   },
+];
+
+// ---------- Demo / dummy data ----------
+// Plausible starting LTPs for the default stocks + indices. The dummy
+// generator random-walks LTP and bumps TTQ each tick so the per-minute
+// candle/volume logic in VerticalLayout has something to chew on.
+const DEMO_SEEDS = [
+    { tkn: '26000', ltp: 23000, symbol: 'NIFTY 50' },
+    { tkn: '1',     ltp: 74000, symbol: 'SENSEX' },
+    { tkn: '2885',  ltp: 1300,  symbol: 'RELIANCE' },
+    { tkn: '1333',  ltp: 770,   symbol: 'HDFCBANK' },
+    { tkn: '4963',  ltp: 1240,  symbol: 'ICICIBANK' },
+    { tkn: '10604', ltp: 1820,  symbol: 'BHARTIARTL' },
+    { tkn: '1594',  ltp: 1335,  symbol: 'INFY' },
+    { tkn: '3045',  ltp: 1030,  symbol: 'SBIN' },
+];
+
+// MT Data Feed API field names (verified against MT_Data_Feed_API_V1.pdf):
+//   MarketData (FT 1) packet fields:
+//     LTP   = Last Traded Price
+//     TTQ   = Total Traded Quantity
+//     O     = Open Price (today's open)
+//     H     = High Price
+//     L     = Low Price
+//     C     = Close Price  ← *** previous day's close ***
+//     ATP   = Average Trade Price
+//     ...
+//   IndexData (FT 1, for NIFTY/SENSEX/etc):
+//     Price = Index Value (current)
+//     O     = Today's Open Value
+//     C     = "Previous Days Close Value of Index"  (verbatim from docs)
+//
+// So the previous-day close is sent in the `C` field on every MarketData /
+// IndexData packet — NOT under `PrevClose` / `PrevCl` / etc. that I was
+// guessing earlier. We probe several candidate names just in case the feed
+// version differs, but `C` is the one that actually arrives.
+const PRICE_KEYS      = ['LTP', 'ltp', 'LastTradedPrice', 'Price', 'lp', 'iv'];
+const OPEN_PRICE_KEYS = ['O', 'Open', 'OpenPrice', 'op', 'OpenRate'];
+const PREV_CLOSE_KEYS = ['C', 'Close', 'PrevClose', 'PreviousClose', 'PrevCl', 'PC'];
+
+const readNum = (packet, keys) => {
+    if (!packet) return null;
+    for (const k of keys) {
+        if (packet[k] !== undefined && packet[k] !== null && packet[k] !== '') {
+            const n = Number(packet[k]);
+            if (!Number.isNaN(n) && n !== 0) return n;
+        }
+    }
+    return null;
+};
+const readLtp       = (p) => readNum(p, PRICE_KEYS);
+const readOpen      = (p) => readNum(p, OPEN_PRICE_KEYS);
+const readPrevClose = (p) => readNum(p, PREV_CLOSE_KEYS);
+
 const App = () => {
-    // --- Global State ---
+    // ---------- Auth gate ----------
+    // If no one is logged in, short-circuit and render the login page. Every
+    // hook below this point only runs once the user is authenticated, which
+    // also means useMarketData is never called with a null credential.
+    const { user, logout } = useAuth();
+    if (!user) {
+        return <LoginPage />;
+    }
+
+    return <AuthedApp user={user} logout={logout} />;
+};
+
+const AuthedApp = ({ user, logout }) => {
+    // Build a unique WS credential for this session. Stable for the lifetime
+    // of this component (i.e. until logout / full reload) — we don't want a
+    // new credential on every render because that would also cause a
+    // reconnect storm.
+    const wsCredential = useMemo(() => buildWsCredential(user), [user]);
+
     const [debugLogs, setDebugLogs] = useState([]);
 
-    // Monitors Management
-    const [monitors, setMonitors] = useState(() => {
-        const saved = localStorage.getItem('mt_monitors_list');
-        return saved ? JSON.parse(saved) : [{ id: 0 }];
-    });
-    const [activeMonitorId, setActiveMonitorId] = useState(() => {
-        const saved = localStorage.getItem('mt_active_id');
-        return saved ? JSON.parse(saved) : 0;
-    });
     const [isWsEnabled, setIsWsEnabled] = useState(() => {
         const saved = localStorage.getItem('mt_ws_enabled');
         return saved !== null ? JSON.parse(saved) : true;
     });
 
-    const [monitorSettings, setMonitorSettings] = useState(() => {
-        const saved = localStorage.getItem('mt_monitor_settings');
-        return saved ? JSON.parse(saved) : {
-            0: { config: true, ceDepth: true, peDepth: true, logs: true }
-        };
-    });
-
-    // Layout Modes per Monitor
-    const [monitorLayouts, setMonitorLayouts] = useState(() => {
-        const saved = localStorage.getItem('mt_monitor_layouts');
-        return saved ? JSON.parse(saved) : { 0: 'original' };
-    });
-
-    // Sidebar Collapse State (only for Vertical mode)
-    const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-
-    useEffect(() => {
-        localStorage.setItem('mt_monitors_list', JSON.stringify(monitors));
-    }, [monitors]);
-
-    useEffect(() => {
-        localStorage.setItem('mt_active_id', JSON.stringify(activeMonitorId));
-    }, [activeMonitorId]);
-
     useEffect(() => {
         localStorage.setItem('mt_ws_enabled', JSON.stringify(isWsEnabled));
     }, [isWsEnabled]);
 
+    // ---------- Multi-monitor state ----------
+    // Each monitor is a fully independent "session": it has its own extra
+    // stocks, its own timeframe, its own histories (stored inside
+    // VerticalLayout, namespaced by monitorId). All monitors render at once
+    // (inactive ones are hidden with CSS) so every monitor keeps processing
+    // WS packets in the background. No monitor ever goes stale just because
+    // it isn't the active tab.
+    const [monitors, setMonitors] = useState(() => {
+        try {
+            const saved = localStorage.getItem('mt_monitors_list');
+            const arr = saved ? JSON.parse(saved) : [{ id: 0 }];
+            return Array.isArray(arr) && arr.length > 0 ? arr : [{ id: 0 }];
+        } catch { return [{ id: 0 }]; }
+    });
+    const [activeMonitorId, setActiveMonitorId] = useState(() => {
+        try {
+            const saved = localStorage.getItem('mt_active_monitor_id');
+            return saved !== null ? JSON.parse(saved) : 0;
+        } catch { return 0; }
+    });
+
+    // Per-monitor extra stocks, keyed by monitor id.
+    const [extraStocksByMonitor, setExtraStocksByMonitor] = useState(() => {
+        try {
+            const saved = localStorage.getItem('mt_extra_stocks_by_monitor_v1');
+            if (saved) return JSON.parse(saved);
+        } catch {}
+        // Migrate from the old single-key storage if present
+        try {
+            const legacy = localStorage.getItem('vl_extra_stocks_v1');
+            if (legacy) return { 0: JSON.parse(legacy) };
+        } catch {}
+        return { 0: [] };
+    });
+
+    // Per-monitor bucket size, keyed by monitor id.
+    const [bucketSizeByMonitor, setBucketSizeByMonitor] = useState(() => {
+        try {
+            const saved = localStorage.getItem('mt_bucket_size_by_monitor_v1');
+            if (saved) return JSON.parse(saved);
+        } catch {}
+        // Migrate from the old single-key storage
+        try {
+            const legacy = localStorage.getItem('vl_bucket_size');
+            if (legacy) return { 0: JSON.parse(legacy) };
+        } catch {}
+        return { 0: 1 };
+    });
+
+    // Persist monitor collections
     useEffect(() => {
-        localStorage.setItem('mt_monitor_settings', JSON.stringify(monitorSettings));
-    }, [monitorSettings]);
-
+        try { localStorage.setItem('mt_monitors_list', JSON.stringify(monitors)); } catch {}
+    }, [monitors]);
     useEffect(() => {
-        localStorage.setItem('mt_monitor_layouts', JSON.stringify(monitorLayouts));
-    }, [monitorLayouts]);
+        try { localStorage.setItem('mt_active_monitor_id', JSON.stringify(activeMonitorId)); } catch {}
+    }, [activeMonitorId]);
+    useEffect(() => {
+        try { localStorage.setItem('mt_extra_stocks_by_monitor_v1', JSON.stringify(extraStocksByMonitor)); } catch {}
+    }, [extraStocksByMonitor]);
+    useEffect(() => {
+        try { localStorage.setItem('mt_bucket_size_by_monitor_v1', JSON.stringify(bucketSizeByMonitor)); } catch {}
+    }, [bucketSizeByMonitor]);
 
-    const [activeNotifications, setActiveNotifications] = useState([]);
+    // Derived: the active monitor's per-monitor settings (used by top bar).
+    const activeExtraStocks = extraStocksByMonitor[activeMonitorId] || [];
+    const activeBucketSize = bucketSizeByMonitor[activeMonitorId] || 1;
 
-    // --- WebSocket Centralization ---
+    const handleAddExtraStockToActive = (symbol) => {
+        if (!symbol) return;
+        if (DEFAULT_SYMBOLS.has(symbol)) return;
+        setExtraStocksByMonitor(prev => {
+            const list = prev[activeMonitorId] || [];
+            if (list.some(e => e.symbol === symbol)) return prev;
+            return { ...prev, [activeMonitorId]: [...list, { symbol }] };
+        });
+    };
+    const handleRemoveExtraStockFromMonitor = (monitorId, symbol) => {
+        setExtraStocksByMonitor(prev => ({
+            ...prev,
+            [monitorId]: (prev[monitorId] || []).filter(e => e.symbol !== symbol),
+        }));
+    };
+    const handleSetBucketSizeForActive = (size) => {
+        setBucketSizeByMonitor(prev => ({ ...prev, [activeMonitorId]: size }));
+    };
+
+    const handleAddMonitor = () => {
+        const newId = Math.max(-1, ...monitors.map(m => m.id)) + 1;
+        setMonitors(prev => [...prev, { id: newId }]);
+        setExtraStocksByMonitor(prev => ({ ...prev, [newId]: [] }));
+        setBucketSizeByMonitor(prev => ({ ...prev, [newId]: 1 }));
+        setActiveMonitorId(newId);
+    };
+
+    const handleRemoveMonitor = (id) => {
+        if (monitors.length <= 1) return;
+        setMonitors(prev => prev.filter(m => m.id !== id));
+        setExtraStocksByMonitor(prev => {
+            const next = { ...prev };
+            delete next[id];
+            return next;
+        });
+        setBucketSizeByMonitor(prev => {
+            const next = { ...prev };
+            delete next[id];
+            return next;
+        });
+        if (activeMonitorId === id) {
+            const remaining = monitors.filter(m => m.id !== id);
+            setActiveMonitorId(remaining[0]?.id ?? 0);
+        }
+        // Clean up that monitor's namespaced localStorage so stale data
+        // doesn't haunt us on the next refresh.
+        try {
+            localStorage.removeItem(`vl_state_v2_m${id}`);
+            localStorage.removeItem(`vl_column_order_v1_m${id}`);
+            localStorage.removeItem(`vl_column_widths_v1_m${id}`);
+            localStorage.removeItem(`vl_int_vol_minutes_v1_m${id}`);
+            localStorage.removeItem(`vl_sidebar_width_v1_m${id}`);
+        } catch {}
+    };
+
+    // ---------- WebSocket ----------
     const addDebug = useCallback((msg) => {
         setDebugLogs(prev => [msg, ...prev].slice(0, 8));
     }, []);
 
     const handleRawMessage = useCallback((type, data) => {
-        // ONLY log management packets, skip high-frequency data to prevent "React Storms"
-        const highFreqTypes = ['Depth', 'DepthData', 'IndexData'];
+        const highFreqTypes = ['Depth', 'DepthData', 'IndexData', 'MarketData'];
         if (type === 'Info' || (type === 'Login' && data?.Error === null)) {
             addDebug(`[WS] ${type} confirmed`);
         } else if (!highFreqTypes.includes(type)) {
@@ -82,296 +279,1007 @@ const App = () => {
         }
     }, [addDebug]);
 
-    // --- Event Bus for Low-Latency Alerts ---
-    const depthEvents = React.useRef(new EventTarget());
-
+    const depthEvents = useRef(new EventTarget());
+    // Mirror demoMode into a ref so the handleDepthPacket callback (which is
+    // stable / memoized) can read the current value without needing to be
+    // re-created. When demo is ON we discard real WS packets entirely so the
+    // synthetic feed and the real feed don't race each other.
+    const demoModeRef = useRef(false);
     const handleDepthPacket = useCallback((packet) => {
-        // Dispatch raw packet immediately to listeners
+        if (demoModeRef.current) return;
         depthEvents.current.dispatchEvent(new CustomEvent('depth-packet', { detail: packet }));
     }, []);
 
-    const { status, depthData, subscribe } = useMarketData(isWsEnabled, handleRawMessage, handleDepthPacket);
+    const { status, depthData, subscribe } = useMarketData(isWsEnabled, handleRawMessage, handleDepthPacket, wsCredential);
 
-    // --- Global Notification Logic ---
-    const addGlobalNotification = useCallback((details) => {
-        setActiveNotifications(prev => {
-            if (prev.find(n => n.id === details.id)) return prev;
-            return [...prev, { ...details, expires: Date.now() + 5000 }];
-        });
-        setTimeout(() => {
-            setActiveNotifications(prev => prev.filter(n => n.id !== details.id));
-        }, 5000);
+    const handleClearAll = () => {
+        // Monitor-scoped clear — only the ACTIVE monitor gets wiped.
+        window.dispatchEvent(new CustomEvent('vl-clear', {
+            detail: { monitorId: activeMonitorId },
+        }));
+    };
+
+    // ---------- Live clock ----------
+    const [clock, setClock] = useState(() => new Date());
+    useEffect(() => {
+        const id = setInterval(() => setClock(new Date()), 1000);
+        return () => clearInterval(id);
+    }, []);
+    const clockStr = `${clock.getHours().toString().padStart(2, '0')}:${clock.getMinutes().toString().padStart(2, '0')}:${clock.getSeconds().toString().padStart(2, '0')}`;
+
+    // ---------- Market open/close state ----------
+    // NSE market hours: Mon–Fri, 09:15–15:32 IST. Outside this window we
+    // show a "Market Closed" overlay and stop processing new packets.
+    // (15:32 rather than 15:30 per user request — small grace window after
+    // the official close so post-close auction prints still land cleanly.)
+    // NOTE: when demoMode is ON we force-treat the market as open so the
+    // synthetic feed can drive the UI regardless of wall-clock time.
+    const isMarketOpenNow = (d) => {
+        const day = d.getDay(); // 0 = Sun, 6 = Sat
+        if (day === 0 || day === 6) return false;
+        const mins = d.getHours() * 60 + d.getMinutes();
+        const OPEN  = 9 * 60 + 15;   // 09:15
+        const CLOSE = 15 * 60 + 32;  // 15:32
+        return mins >= OPEN && mins < CLOSE;
+    };
+    const realMarketOpen = isMarketOpenNow(clock);
+
+    // ---------- Demo mode ----------
+    // Declared here (ABOVE the marketOpen computation) because demo mode
+    // forces marketOpen to true regardless of wall-clock time. Persists to
+    // localStorage so reloads keep the chosen mode.
+    // Dummy/demo data feature disabled — always use the live WS feed.
+    // const [demoMode, setDemoMode] = useState(() => {
+    //     try { return JSON.parse(localStorage.getItem('vl_demo_mode') || 'false'); } catch { return false; }
+    // });
+    // useEffect(() => {
+    //     try { localStorage.setItem('vl_demo_mode', JSON.stringify(demoMode)); } catch {}
+    //     demoModeRef.current = demoMode;
+    // }, [demoMode]);
+    const demoMode = false;
+    const setDemoMode = () => {};
+
+    // Final marketOpen signal — real clock OR demo mode.
+    const marketOpen = realMarketOpen || demoMode;
+
+    // Let the user manually dismiss the overlay. Auto-resets the moment the
+    // market opens again, so tomorrow morning the overlay can show normally.
+    const [marketClosedDismissed, setMarketClosedDismissed] = useState(false);
+    useEffect(() => {
+        if (marketOpen && marketClosedDismissed) setMarketClosedDismissed(false);
+    }, [marketOpen, marketClosedDismissed]);
+
+    // ---------- Auto-disconnect on market close ----------
+    // When the market transitions into "closed" state (or if the app is
+    // loaded during non-trading hours), automatically force-disconnect the
+    // WebSocket so the system stops entirely. One-way coupling only —
+    // re-opening is still a manual action (user clicks Connect), so a user
+    // who intentionally reconnects mid-close to inspect data doesn't get
+    // hammered by this effect.
+    useEffect(() => {
+        if (!marketOpen) {
+            setIsWsEnabled(false);
+        }
+    }, [marketOpen]);
+
+    const [demoDepth, setDemoDepth] = useState({});
+
+    // Mirror the flattened union of every monitor's extra stocks into a ref
+    // so the demo interval can pick up new user-added stocks across all
+    // monitors without being torn down.
+    const extraStocksRef = useRef([]);
+    useEffect(() => {
+        const union = [];
+        const seen = new Set();
+        for (const list of Object.values(extraStocksByMonitor)) {
+            for (const es of (list || [])) {
+                if (!seen.has(es.symbol)) {
+                    seen.add(es.symbol);
+                    union.push(es);
+                }
+            }
+        }
+        extraStocksRef.current = union;
+    }, [extraStocksByMonitor]);
+
+    // Per-token mutable demo state stays in a ref so accumulated TTQ persists
+    // across renders (and we can add tokens on-the-fly when extras get added).
+    // Each entry:  { tkn, symbol, ltp (current), ttq, prevClose (locked) }
+    const demoStateRef = useRef({});
+
+    // Demo data generator disabled.
+    /*
+    useEffect(() => {
+        if (!demoMode) {
+            setDemoDepth({});
+            demoStateRef.current = {};
+            return;
+        }
+
+        // Seed the default tokens. prevClose is locked at the seed LTP so it
+        // behaves like a real previous day's close, giving A/D a baseline.
+        for (const s of DEMO_SEEDS) {
+            if (!demoStateRef.current[s.tkn]) {
+                demoStateRef.current[s.tkn] = {
+                    tkn: s.tkn,
+                    symbol: s.symbol,
+                    ltp: s.ltp,
+                    ttq: 0,
+                    prevClose: s.ltp,
+                };
+            }
+        }
+
+        // Helper: dispatch a synthetic depth-packet on the same event bus the
+        // real WS uses. All downstream consumers (VerticalLayout.processPacket,
+        // NIFTY A/D handler, ATM widget handler) listen to this bus, so this
+        // is the ONLY place demo data needs to flow through.
+        const dispatchDemo = (s) => {
+            const packet = {
+                Tkn: s.tkn,
+                LTP: s.ltp,
+                TTQ: s.ttq,
+                C:   s.prevClose,           // prev close → NIFTY A/D baseline
+                O:   s.prevClose,           // treat open as prev close in demo
+                _type: 'MarketData',
+                _receivedAt: Date.now(),
+            };
+            depthEvents.current.dispatchEvent(
+                new CustomEvent('depth-packet', { detail: packet })
+            );
+        };
+
+        // Pre-fill the snapshot + fire one packet per seed so the UI lights
+        // up on the very first tick instead of waiting a full second.
+        const initial = {};
+        for (const s of Object.values(demoStateRef.current)) {
+            initial[s.tkn] = { Tkn: s.tkn, LTP: s.ltp, TTQ: s.ttq, C: s.prevClose };
+            dispatchDemo(s);
+        }
+        setDemoDepth(initial);
+
+        const id = setInterval(() => {
+            // Pull in any newly-added extra stocks. Look up their token from
+            // stocks_nsecm.json and assign a plausible random starting LTP.
+            for (const es of extraStocksRef.current) {
+                const row = stocksData.find(r => r.s === es.symbol && (r.x === 'NSECM' || r.x === 'NSE'));
+                if (row && !demoStateRef.current[row.t]) {
+                    const seedLtp = 200 + Math.random() * 4800;
+                    demoStateRef.current[row.t] = {
+                        tkn: row.t,
+                        symbol: es.symbol,
+                        ltp: seedLtp,
+                        ttq: 0,
+                        prevClose: seedLtp,
+                    };
+                }
+            }
+
+            const next = {};
+            for (const s of Object.values(demoStateRef.current)) {
+                // LTP random walk ±0.15%
+                const drift = (Math.random() - 0.5) * 0.003;
+                s.ltp = +(s.ltp * (1 + drift)).toFixed(2);
+                // TTQ jump 0..200000
+                s.ttq += Math.floor(Math.random() * 200000);
+                next[s.tkn] = { Tkn: s.tkn, LTP: s.ltp, TTQ: s.ttq, C: s.prevClose };
+                dispatchDemo(s);
+            }
+            setDemoDepth(next);
+        }, 1000);
+        return () => clearInterval(id);
+    }, [demoMode]);
+    */
+
+    // ---------- Effective depthData (real or dummy) ----------
+    // Only used now by the NIFTY/SENSEX top-bar LTP tiles, which read
+    // straight from state. Everything else is event-driven.
+    const effectiveDepth = demoMode ? demoDepth : depthData;
+
+    // ---------- NIFTY / SENSEX live LTP for the top bar ----------
+    const niftyLtp = readLtp(effectiveDepth?.['26000']);
+    const sensexLtp = readLtp(effectiveDepth?.['1']);
+
+    // ---------- ATM option widget (NIFTY / SENSEX CE+PE) ----------
+    // Build three things ONCE per mount (contracts file is static at runtime):
+    //   1. nearestExpiries — the nearest future expiry for NIFTY and BSX
+    //   2. availableStrikes — sorted integer arrays of every strike that
+    //      actually exists in contracts_nsefo.json for that expiry, separated
+    //      CE and PE (they're usually identical but we use CE as the source
+    //      of truth for strike matching).
+    // The ATM strike is then the element of `availableStrikes` closest to
+    // the current spot — NO hardcoded 50/100 step, so we can never produce
+    // a strike that doesn't exist as a listed contract.
+    const { nearestExpiries, availableStrikes } = useMemo(() => {
+        const todayIso = new Date().toISOString().split('T')[0];
+        const expiries = {};
+        const strikes  = {};
+        for (const symbol of ['NIFTY', 'BSX']) {
+            const future = contractsData.filter(
+                c => c.s === symbol && (c.e || '') >= todayIso
+            );
+            const sortedExpiries = [...new Set(future.map(c => c.e))].sort();
+            const nearest = sortedExpiries[0] || null;
+            expiries[symbol] = nearest;
+            if (nearest) {
+                // Collect every CE strike at the nearest expiry, dedup, sort.
+                const set = new Set();
+                for (const c of future) {
+                    if (c.e === nearest && c.p === 'CE') {
+                        const n = Number(c.st);
+                        if (Number.isFinite(n)) set.add(Math.round(n));
+                    }
+                }
+                strikes[symbol] = [...set].sort((a, b) => a - b);
+            } else {
+                strikes[symbol] = [];
+            }
+        }
+        return { nearestExpiries: expiries, availableStrikes: strikes };
     }, []);
 
-    // --- Monitor Management ---
-    const handleAddMonitor = () => {
-        const newId = Math.max(...monitors.map(m => m.id), -1) + 1;
-        setMonitors(prev => [...prev, { id: newId }]);
-        setMonitorSettings(prev => ({
-            ...prev,
-            [newId]: { config: true, ceDepth: true, peDepth: true, logs: true }
-        }));
-        setMonitorLayouts(prev => ({
-            ...prev,
-            [newId]: 'original'
-        }));
-        setActiveMonitorId(newId);
-    };
-
-    const handleRemoveMonitor = (id) => {
-        if (monitors.length <= 1) return;
-        setMonitors(prev => prev.filter(m => m.id !== id));
-        const newSettings = { ...monitorSettings };
-        delete newSettings[id];
-        setMonitorSettings(newSettings);
-
-        const newLayouts = { ...monitorLayouts };
-        delete newLayouts[id];
-        setMonitorLayouts(newLayouts);
-
-        if (activeMonitorId === id) setActiveMonitorId(monitors[0].id);
-    };
-
-    // Toggle Visibility
-    const toggleElement = (element) => {
-        setMonitorSettings(prev => ({
-            ...prev,
-            [activeMonitorId]: {
-                ...prev[activeMonitorId],
-                [element]: !prev[activeMonitorId][element]
+    // Snap `spot` to the closest value in `strikes` (sorted ascending).
+    // Returns an integer strike or null. Uses linear scan since the array
+    // has ≤ a few hundred entries — fine for once-per-render work.
+    const snapToClosestStrike = (spot, strikes) => {
+        if (spot == null || !strikes || strikes.length === 0) return null;
+        let best = strikes[0];
+        let bestDiff = Math.abs(spot - best);
+        for (let i = 1; i < strikes.length; i++) {
+            const diff = Math.abs(spot - strikes[i]);
+            if (diff < bestDiff) {
+                bestDiff = diff;
+                best = strikes[i];
+            } else if (strikes[i] > spot && diff >= bestDiff) {
+                // early exit: sorted ascending, distance only grows from here
+                break;
             }
-        }));
+        }
+        return best; // already an integer (we rounded when building the set)
     };
 
-    const currentSettings = monitorSettings[activeMonitorId] || { config: true, ceDepth: true, peDepth: true, logs: true };
-    const currentLayout = monitorLayouts[activeMonitorId] || 'original';
+    // Compute ATM strikes. These ARE guaranteed integers — the strike pool
+    // is built from Math.round()'d values above, so there's no way a decimal
+    // can sneak in no matter what the spot LTP is.
+    const niftyAtmStrike  = snapToClosestStrike(niftyLtp,  availableStrikes.NIFTY);
+    const sensexAtmStrike = snapToClosestStrike(sensexLtp, availableStrikes.BSX);
 
-    // Dynamic Sidebar Elements based on Layout
-    const sidebarElements = currentLayout === 'vertical'
-        ? [{ id: 'config', label: 'Configuration' }]
-        : [
-            { id: 'config', label: 'Configuration' },
-            { id: 'ceDepth', label: 'CE Depth' },
-            { id: 'peDepth', label: 'PE Depth' },
-            { id: 'logs', label: 'Live Logs' }
-        ];
+    // Resolve CE / PE tokens for the current ATM. Returns { tkn, strike }
+    // or null if we can't find a match.
+    const resolveOption = (indexSymbol, strike, ceOrPe) => {
+        if (strike == null) return null;
+        const expiry = nearestExpiries[indexSymbol];
+        if (!expiry) return null;
+        // Compare with a small epsilon tolerance so a contract stored as
+        // "23450.00000" matches an integer 23450 even if either side has
+        // trailing float noise from a previous operation.
+        const match = contractsData.find(
+            c => c.s === indexSymbol
+                && c.e === expiry
+                && c.p === ceOrPe
+                && Math.abs(Number(c.st) - strike) < 0.5
+        );
+        return match ? { tkn: match.t, strike } : null;
+    };
 
-    // Sidebar Visibility Logic
-    // Controlled by sidebarCollapsed in both modes
-    const isSidebarVisible = !sidebarCollapsed;
+    const niftyCe  = useMemo(() => resolveOption('NIFTY', niftyAtmStrike, 'CE'),
+        [niftyAtmStrike, nearestExpiries]);
+    const niftyPe  = useMemo(() => resolveOption('NIFTY', niftyAtmStrike, 'PE'),
+        [niftyAtmStrike, nearestExpiries]);
+    const sensexCe = useMemo(() => resolveOption('BSX',   sensexAtmStrike, 'CE'),
+        [sensexAtmStrike, nearestExpiries]);
+    const sensexPe = useMemo(() => resolveOption('BSX',   sensexAtmStrike, 'PE'),
+        [sensexAtmStrike, nearestExpiries]);
+
+    // Track LTPs for the 4 ATM tokens. Updated synchronously on every
+    // depth-packet, synced to React state once a second for rendering.
+    const atmLtpsRef = useRef({});                    // { tkn: ltp }
+    const [atmLtps, setAtmLtps] = useState({});
+    const atmSubscribedRef = useRef(new Set());       // tokens we've already subscribed to
+
+    // Subscribe to any newly-computed ATM tokens. Old ones from previous
+    // strikes remain subscribed in the background (harmless — we just ignore
+    // their packets). This keeps the logic simple and avoids an unsubscribe
+    // dance every time the spot crosses a strike boundary.
+    useEffect(() => {
+        if (typeof subscribe !== 'function') return;
+        const toSubscribe = [];
+        const maybeAdd = (opt, xchg, symLabel) => {
+            if (!opt?.tkn) return;
+            const key = `${xchg}:${opt.tkn}`;
+            if (atmSubscribedRef.current.has(key)) return;
+            atmSubscribedRef.current.add(key);
+            toSubscribe.push({ Xchg: xchg, Tkn: String(opt.tkn), Symbol: symLabel });
+        };
+        maybeAdd(niftyCe,  'NSEFO', `NIFTY ${niftyAtmStrike} CE`);
+        maybeAdd(niftyPe,  'NSEFO', `NIFTY ${niftyAtmStrike} PE`);
+        maybeAdd(sensexCe, 'BSEFO', `SENSEX ${sensexAtmStrike} CE`);
+        maybeAdd(sensexPe, 'BSEFO', `SENSEX ${sensexAtmStrike} PE`);
+        if (toSubscribe.length > 0) {
+            try {
+                subscribe(toSubscribe, 2); // FeedType 2 = Depth (for options)
+                console.log('[ATM] Subscribed:', toSubscribe.map(q => `${q.Xchg}:${q.Tkn} (${q.Symbol})`));
+            } catch (e) {
+                console.warn('[ATM] subscribe failed', e);
+            }
+        } else {
+            console.log('[ATM] Current tokens', {
+                niftyCe: niftyCe?.tkn, niftyPe: niftyPe?.tkn,
+                sensexCe: sensexCe?.tkn, sensexPe: sensexPe?.tkn,
+                niftyAtmStrike, sensexAtmStrike,
+            });
+        }
+    }, [niftyCe, niftyPe, sensexCe, sensexPe, subscribe, niftyAtmStrike, sensexAtmStrike]);
+
+    // ---------- Seed ATM options into demo state ----------
+    // The existing demo interval walks every entry in `demoStateRef`. So as
+    // soon as we inject the 4 currently-resolved ATM option tokens here, the
+    // next tick will random-walk them and dispatch synthetic depth-packets
+    // for each — which the ATM widget's listener picks up like any other
+    // packet. This makes the widget populate in demo mode without any
+    // special-casing downstream.
+    // ATM demo seeding disabled along with the rest of the dummy feature.
+    /*
+    useEffect(() => {
+        if (!demoMode) return;
+        // Plausible at-the-money weekly premiums — random-walked ±0.15% per
+        // second just like the stock LTPs. Rough approximation based on
+        // ATM * IV * sqrt(T/365) with IV≈15% and T≈7 days.
+        const seed = (opt, label, basePremium) => {
+            if (!opt?.tkn) return;
+            if (demoStateRef.current[opt.tkn]) return; // already seeded
+            // Random starting point within ±20% of the base so the 4 values
+            // aren't all identical on first frame.
+            const ltp = basePremium * (0.8 + Math.random() * 0.4);
+            demoStateRef.current[opt.tkn] = {
+                tkn: String(opt.tkn),
+                symbol: label,
+                ltp,
+                ttq: 0,
+                prevClose: basePremium, // lock so A/D-style math (if ever used) has a baseline
+            };
+            console.log(`[ATM demo seed] ${label} tkn=${opt.tkn} ltp≈${ltp.toFixed(2)}`);
+        };
+        seed(niftyCe,  `NIFTY ${niftyAtmStrike} CE`, 150);
+        seed(niftyPe,  `NIFTY ${niftyAtmStrike} PE`, 150);
+        seed(sensexCe, `SENSEX ${sensexAtmStrike} CE`, 500);
+        seed(sensexPe, `SENSEX ${sensexAtmStrike} PE`, 500);
+    }, [demoMode, niftyCe, niftyPe, sensexCe, sensexPe, niftyAtmStrike, sensexAtmStrike]);
+    */
+
+    // One packet listener for all 4 tokens. Updates the ref synchronously
+    // so the event handler isn't throttled in background tabs.
+    useEffect(() => {
+        const bus = depthEvents.current;
+        const handler = (e) => {
+            const packet = e.detail;
+            const tkn = packet?.Tkn;
+            if (!tkn) return;
+            const ltp = readLtp(packet);
+            if (ltp == null) return;
+            atmLtpsRef.current[String(tkn)] = ltp;
+        };
+        bus.addEventListener('depth-packet', handler);
+        return () => bus.removeEventListener('depth-packet', handler);
+    }, []);
+
+    // Sync ref → state at 1 Hz so the widget re-renders.
+    useEffect(() => {
+        const id = setInterval(() => {
+            setAtmLtps({ ...atmLtpsRef.current });
+        }, 1000);
+        return () => clearInterval(id);
+    }, []);
+
+    const niftyCeLtp  = niftyCe  ? atmLtps[String(niftyCe.tkn)]  : null;
+    const niftyPeLtp  = niftyPe  ? atmLtps[String(niftyPe.tkn)]  : null;
+    const sensexCeLtp = sensexCe ? atmLtps[String(sensexCe.tkn)] : null;
+    const sensexPeLtp = sensexPe ? atmLtps[String(sensexPe.tkn)] : null;
+
+    // ---------- NIFTY 50 Advance / Decline ----------
+    // Resolve every NIFTY 50 constituent's NSE token via stocksData. Subscribe
+    // to all 50 on mount, extract the baseline (prev-close > open > first-seen
+    // LTP, in that priority) from each packet, then compare current LTP to
+    // baseline to decide advance vs decline.
+    const NIFTY_50_TOKENS = useMemo(() => {
+        const out = [];
+        const missing = [];
+        for (const sym of NIFTY_50) {
+            const row = stocksData.find(r => r.s === sym && (r.x === 'NSECM' || r.x === 'NSE'));
+            if (row) out.push({ symbol: sym, tkn: row.t });
+            else missing.push(sym);
+        }
+        if (missing.length > 0) {
+            console.warn(
+                `[NiftyAD] ${missing.length}/${NIFTY_50.length} symbols not found in stocks_nsecm.json — A/D will undercount by this many. Missing: ${missing.join(', ')}`
+            );
+        } else {
+            console.log(`[NiftyAD] All ${out.length} NIFTY 50 symbols resolved to tokens.`);
+        }
+        return out;
+    }, []);
+
+    // The A/D baseline is STRICTLY previous day's close (the `C` field on
+    // MarketData/IndexData packets, per MT Data Feed API V1). We do not
+    // fall back to first-seen LTP or to today's open — those would tie the
+    // calculation to whenever the user happened to open the app, which is
+    // exactly the bug we're fixing.
+    const niftyBaselineRef = useRef({});       // { [tkn]: prevDayClose }
+    const niftyLtpsRef     = useRef({});       // { [tkn]: latest LTP }
+    const [niftyAD, setNiftyAD] = useState({ advances: 0, declines: 0, unchanged: 0, tracked: 0 });
+
+    // Load baselines from localStorage (day-keyed). The persisted blob from
+    // older versions had a `baselineSource` field; we ignore it now since the
+    // baseline is always "C" (prev close) under the new model.
+    useEffect(() => {
+        try {
+            const raw = localStorage.getItem('nifty_baseline_v1');
+            if (!raw) return;
+            const parsed = JSON.parse(raw);
+            const today = (() => {
+                const d = new Date();
+                return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+            })();
+            if (parsed?.day === today && parsed.baseline) {
+                niftyBaselineRef.current = parsed.baseline;
+            }
+        } catch {}
+    }, []);
+
+    // Subscribe to all NIFTY 50 tokens once the WS subscribe fn is available
+    useEffect(() => {
+        if (typeof subscribe !== 'function') return;
+        if (NIFTY_50_TOKENS.length === 0) return;
+        const quotes = NIFTY_50_TOKENS.map(t => ({
+            Xchg: 'NSECM',
+            Tkn: t.tkn,
+            Symbol: t.symbol,
+        }));
+        try {
+            subscribe(quotes, 1);
+            console.log(`[NiftyAD] Subscribed to ${quotes.length} NIFTY 50 tokens.`);
+        } catch (e) {
+            console.warn('[NiftyAD] subscribe failed', e);
+        }
+    }, [subscribe, NIFTY_50_TOKENS]);
+
+    // Once-only debug: log the FULL keys of the first NIFTY packet we see so
+    // the user can identify any feed-specific field names we're missing.
+    const niftyDebugLoggedRef = useRef(false);
+
+    // Listen for every WS packet — pick out NIFTY 50 tokens and update the
+    // baseline (prev close `C`) + latest LTP refs.
+    useEffect(() => {
+        const niftySet = new Set(NIFTY_50_TOKENS.map(t => t.tkn));
+        const bus = depthEvents.current;
+
+        const persistBaseline = () => {
+            try {
+                const d = new Date();
+                const today = `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+                localStorage.setItem('nifty_baseline_v1', JSON.stringify({
+                    day: today,
+                    baseline: niftyBaselineRef.current,
+                }));
+            } catch {}
+        };
+
+        const handler = (e) => {
+            const packet = e.detail;
+            const tkn = packet?.Tkn;
+            if (!tkn || !niftySet.has(String(tkn))) return;
+            const ltp = readLtp(packet);
+            if (ltp == null) return;
+            const tknStr = String(tkn);
+
+            // One-time debug dump so we can see the full packet field set.
+            if (!niftyDebugLoggedRef.current) {
+                niftyDebugLoggedRef.current = true;
+                console.log('[NiftyAD] sample NIFTY packet keys:', Object.keys(packet));
+                console.log('[NiftyAD] sample NIFTY packet:', packet);
+            }
+
+            niftyLtpsRef.current[tknStr] = ltp;
+
+            // STRICT: only set the baseline if the packet actually carries a
+            // previous-close value. No LTP fallback, no open fallback. If the
+            // feed never sends `C` for some token, that token simply won't be
+            // counted in A/D — better to undercount than to silently fake it.
+            const pc = readPrevClose(packet);
+            if (pc != null && niftyBaselineRef.current[tknStr] !== pc) {
+                niftyBaselineRef.current[tknStr] = pc;
+                persistBaseline();
+            }
+        };
+        bus.addEventListener('depth-packet', handler);
+        return () => bus.removeEventListener('depth-packet', handler);
+    }, [NIFTY_50_TOKENS]);
+
+    // Recompute Advance / Decline counts every second from the refs.
+    useEffect(() => {
+        const id = setInterval(() => {
+            const baselines = niftyBaselineRef.current;
+            const ltps      = niftyLtpsRef.current;
+            let advances = 0, declines = 0, unchanged = 0, tracked = 0;
+            for (const t of NIFTY_50_TOKENS) {
+                const b = baselines[t.tkn];
+                const l = ltps[t.tkn];
+                if (b == null || l == null) continue;
+                tracked++;
+                if (l > b) advances++;
+                else if (l < b) declines++;
+                else unchanged++;
+            }
+            setNiftyAD(prev => (
+                prev.advances === advances &&
+                prev.declines === declines &&
+                prev.unchanged === unchanged &&
+                prev.tracked === tracked
+                    ? prev
+                    : { advances, declines, unchanged, tracked }
+            ));
+        }, 1000);
+        return () => clearInterval(id);
+    }, [NIFTY_50_TOKENS]);
+
+    // Bar widths — defaults to 50/50 when no data has arrived yet.
+    const adTotal = niftyAD.advances + niftyAD.declines;
+    const advancePct = adTotal > 0 ? (niftyAD.advances / adTotal) * 100 : 50;
+    const declinePct = adTotal > 0 ? 100 - advancePct : 50;
+
+    // ---------- Stock dropdown ----------
+    const [dropdownOpen, setDropdownOpen] = useState(false);
+    const [search, setSearch] = useState('');
+    const dropdownRef = useRef(null);
+
+    useEffect(() => {
+        const onDoc = (e) => {
+            if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
+                setDropdownOpen(false);
+            }
+        };
+        if (dropdownOpen) document.addEventListener('mousedown', onDoc);
+        return () => document.removeEventListener('mousedown', onDoc);
+    }, [dropdownOpen]);
+
+    // Add-Stock dropdown is restricted to NIFTY 50 constituents that we can
+    // resolve to a token in stocks_nsecm.json.
+    const niftySymbolsAvailable = useMemo(() => {
+        const present = new Set();
+        for (const r of stocksData) {
+            if ((r.x === 'NSECM' || r.x === 'NSE') && r.s) present.add(r.s);
+        }
+        return NIFTY_50.filter(s => present.has(s)).sort();
+    }, []);
+
+    const filteredSymbols = useMemo(() => {
+        const q = search.trim().toUpperCase();
+        const exclude = new Set([
+            ...DEFAULT_SYMBOLS,
+            ...activeExtraStocks.map(e => e.symbol),
+        ]);
+        return niftySymbolsAvailable.filter(s => !exclude.has(s) && (!q || s.includes(q)));
+    }, [niftySymbolsAvailable, search, activeExtraStocks]);
+
+    // ---------- Volume display unit (auto/K/L/Cr) ----------
+    const [volumeUnit, setVolumeUnit] = useState(() => {
+        try {
+            const saved = JSON.parse(localStorage.getItem('vl_volume_unit') || '"auto"');
+            return VOLUME_UNIT_OPTIONS.some(o => o.value === saved) ? saved : 'auto';
+        } catch { return 'auto'; }
+    });
+    useEffect(() => {
+        try { localStorage.setItem('vl_volume_unit', JSON.stringify(volumeUnit)); } catch {}
+    }, [volumeUnit]);
 
     return (
-        <div className="min-h-screen bg-[#050505] text-white flex h-screen overflow-hidden font-sans selection:bg-blue-500/30">
+        <div className="min-h-screen bg-[#050505] text-white flex flex-col h-screen overflow-hidden font-sans selection:bg-blue-500/30">
 
-            {/* Sidebar Toggle (Only when Sidebar is Hidden) */}
-            {!isSidebarVisible && (
-                <button
-                    onClick={() => setSidebarCollapsed(false)}
-                    className="fixed top-3 left-3 z-[60] p-2 bg-[#0a0a0e] border border-white/10 rounded-lg text-white/40 hover:text-white hover:bg-white/10 transition-all shadow-lg"
-                    title="Show Sidebar"
-                >
-                    <PanelLeft size={16} />
-                </button>
-            )}
+            {/* --- TOP BAR --- */}
+            <header className="flex items-center gap-3 px-4 h-12 border-b border-white/10 bg-[#0a0a0e] flex-shrink-0">
+                {/* Title */}
+                <div className="flex items-center gap-2">
+                    <Activity size={16} className="text-emerald-400" />
+                    <span className="text-[14px] text-white/90 uppercase font-black tracking-wider">
+                        Funnel <span className="text-emerald-400">EQ</span>
+                    </span>
+                </div>
 
-            {/* --- SIDEBAR --- */}
-            <aside className={cn("bg-[#0a0a0e] border-r border-white/5 flex flex-col flex-shrink-0 transition-all duration-300",
-                isSidebarVisible ? "w-56" : "w-0 overflow-hidden border-none"
-            )}>
-                {/* Header */}
-                <div className="p-4 border-b border-white/5">
-                    <div className="flex items-center justify-between">
-                        <div className="flex-1 flex items-center justify-center py-1">
-                            <img src={logo} alt="Logo" className="w-[150%] h-auto max-h-32 object-contain drop-shadow-[0_0_15px_rgba(251,191,36,0.5)] transition-transform hover:scale-105" />
-                        </div>
-                        {/* Collapse Button */}
-                        <button
-                            onClick={() => setSidebarCollapsed(true)}
-                            className="p-1.5 rounded text-white/30 hover:text-white hover:bg-white/10 transition-all ml-1 flex-shrink-0"
-                            title="Hide Sidebar"
-                        >
-                            <PanelLeftClose size={14} />
-                        </button>
+                {/* NIFTY / SENSEX live spot prices */}
+                <div className="flex items-center gap-2 ml-3">
+                    <div className="flex items-center gap-2 bg-white/[0.04] border border-white/10 rounded px-2.5 h-8">
+                        <span className="text-[11px] font-black text-cyan-400/80 uppercase tracking-wider">Nifty</span>
+                        <span className="text-[15px] font-black text-yellow-400 font-mono tabular-nums">
+                            {niftyLtp !== null ? niftyLtp.toFixed(2) : '—'}
+                        </span>
                     </div>
-                    <div className="mt-1 flex items-center justify-between">
-                        <div className="flex items-center gap-1.5 text-[10px] text-white/40">
-                            <div className={cn("w-1.5 h-1.5 rounded-full",
-                                status === 'connected' ? 'bg-success animate-pulse' :
-                                    status === 'connecting' ? 'bg-yellow-400 animate-pulse' : 'bg-danger')} />
-                            <span>{status.toUpperCase()}</span>
+                    <div className="flex items-center gap-2 bg-white/[0.04] border border-white/10 rounded px-2.5 h-8">
+                        <span className="text-[11px] font-black text-cyan-400/80 uppercase tracking-wider">Sensex</span>
+                        <span className="text-[15px] font-black text-yellow-400 font-mono tabular-nums">
+                            {sensexLtp !== null ? sensexLtp.toFixed(2) : '—'}
+                        </span>
+                    </div>
+
+                    {/* NIFTY 50 Advance / Decline */}
+                    <div
+                        className="flex items-center gap-1.5 bg-white/[0.04] border border-white/10 rounded px-2 h-8"
+                        title={
+                            `NIFTY 50 — ${niftyAD.advances} advancing, ` +
+                            `${niftyAD.declines} declining, ` +
+                            `${niftyAD.unchanged} unchanged. ` +
+                            `Tracked: ${niftyAD.tracked} of ${NIFTY_50.length}.`
+                        }
+                    >
+                        <span className="text-[9px] font-black text-emerald-400/80 uppercase tracking-wider">Adv</span>
+                        <span className="text-[13px] font-black text-emerald-400 font-mono tabular-nums leading-none w-5 text-right">
+                            {niftyAD.advances}
+                        </span>
+                        <div className="w-24 h-3 bg-white/5 rounded-sm overflow-hidden flex border border-white/10">
+                            <div
+                                className="h-full bg-emerald-500 transition-[width] duration-700"
+                                style={{ width: `${advancePct}%` }}
+                            />
+                            <div
+                                className="h-full bg-red-500 transition-[width] duration-700"
+                                style={{ width: `${declinePct}%` }}
+                            />
                         </div>
-                        <button
-                            onClick={() => setIsWsEnabled(!isWsEnabled)}
-                            className={cn(
-                                "text-[9px] px-2 py-0.5 rounded-full border transition-all font-bold uppercase tracking-wider",
-                                isWsEnabled
-                                    ? "bg-red-500/10 text-red-400 border-red-500/20 hover:bg-red-500/20"
-                                    : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/20"
-                            )}
-                        >
-                            {isWsEnabled ? "Disconnect" : "Connect"}
-                        </button>
+                        <span className="text-[13px] font-black text-red-400 font-mono tabular-nums leading-none w-5 text-left">
+                            {niftyAD.declines}
+                        </span>
+                        <span className="text-[9px] font-black text-red-400/80 uppercase tracking-wider">Dec</span>
+                        <span className="text-[13px] font-black text-white/40 font-mono tabular-nums leading-none ml-1">
+                            /{NIFTY_50.length}
+                        </span>
                     </div>
                 </div>
 
-                {/* Section: Layout Mode */}
-                <div className="p-3 border-b border-white/5">
-                    <p className="text-[10px] uppercase text-white/20 font-bold tracking-wider mb-2 px-1">View</p>
-                    <div className="flex bg-white/5 rounded p-0.5 border border-white/10">
-                        <button
-                            onClick={() => setMonitorLayouts(prev => ({ ...prev, [activeMonitorId]: 'original' }))}
-                            className={cn("flex-1 py-1.5 rounded text-[10px] font-bold flex items-center justify-center gap-1.5 transition-all",
-                                currentLayout === 'original' ? "bg-blue-600 text-white shadow-md shadow-blue-500/20" : "text-white/40 hover:text-white hover:bg-white/5"
-                            )}
-                        >
-                            <LayoutGrid size={12} /> Grid
-                        </button>
-                        <button
-                            onClick={() => setMonitorLayouts(prev => ({ ...prev, [activeMonitorId]: 'vertical' }))}
-                            className={cn("flex-1 py-1.5 rounded text-[10px] font-bold flex items-center justify-center gap-1.5 transition-all",
-                                currentLayout === 'vertical' ? "bg-blue-600 text-white shadow-md shadow-blue-500/20" : "text-white/40 hover:text-white hover:bg-white/5"
-                            )}
-                        >
-                            <Columns size={12} /> Columns
-                        </button>
-                    </div>
-                </div>
-
-                {/* Section 1: Watchlist */}
-                <div className="p-3 overflow-y-auto max-h-[30vh] border-b border-white/5">
-                    <p className="text-[10px] uppercase text-white/20 font-bold tracking-wider mb-2 px-1">Watchlist</p>
-                    <div className="space-y-1">
-                        {monitors.map((m, idx) => (
-                            <button
-                                key={m.id}
-                                onClick={() => setActiveMonitorId(m.id)}
-                                className={cn(
-                                    "w-full text-left px-3 py-2 rounded-lg transition-all text-xs flex items-center justify-between group",
-                                    activeMonitorId === m.id
-                                        ? "bg-blue-600/10 text-blue-400 border border-blue-500/20"
-                                        : "text-white/50 hover:bg-white/5 hover:text-white"
-                                )}
-                            >
-                                <span className="flex items-center gap-2">
-                                    Monitor {idx + 1}
-                                </span>
-                                {monitors.length > 1 && (
-                                    <Trash2 size={12} className="opacity-0 group-hover:opacity-100 hover:text-red-400"
-                                        onClick={(e) => { e.stopPropagation(); handleRemoveMonitor(m.id); }}
-                                    />
-                                )}
-                            </button>
+                {/* Timeframe filter (per active monitor) */}
+                <div className="flex items-center gap-1.5 bg-white/[0.04] border border-white/10 rounded px-2 h-8 ml-3">
+                    <span className="text-[9px] font-black text-white/40 uppercase tracking-wider">Timeframe Filters</span>
+                    <select
+                        value={activeBucketSize}
+                        onChange={(e) => handleSetBucketSizeForActive(Number(e.target.value))}
+                        className="bg-transparent text-[12px] font-black text-emerald-300 font-mono tabular-nums focus:outline-none cursor-pointer"
+                    >
+                        {BUCKET_OPTIONS.map(o => (
+                            <option key={o.value} value={o.value} className="bg-[#0a0a0e] text-emerald-300">
+                                {o.label}
+                            </option>
                         ))}
-                        <button onClick={handleAddMonitor} className="w-full py-2 mt-2 border border-dashed border-white/10 rounded-lg text-white/30 text-[10px] hover:border-white/30 hover:text-white transition-colors flex items-center justify-center gap-1">
-                            <Plus size={12} /> Add Tab
-                        </button>
-                    </div>
+                    </select>
                 </div>
 
-                {/* Section 2: Recent Alerts Box */}
-                <div className="flex-1 min-h-0 flex flex-col border-b border-white/5 bg-black/40">
-                    <div className="p-3 border-b border-white/5 flex items-center justify-between">
-                        <p className="text-[10px] uppercase text-yellow-400/60 font-bold tracking-wider px-1">Recent Alerts</p>
-                        <span className="text-[8px] text-white/20 font-mono tracking-tighter">LIVE</span>
-                    </div>
-                    <div className="flex-1 overflow-y-auto p-2 space-y-2 scrollbar-none">
-                        <AnimatePresence initial={false}>
-                            {activeNotifications.map((n) => (
-                                <motion.div
-                                    key={n.id}
-                                    initial={{ x: -20, opacity: 0 }}
-                                    animate={{ x: 0, opacity: 1 }}
-                                    exit={{ x: -20, opacity: 0 }}
-                                    className={cn(
-                                        "bg-white/[0.03] backdrop-blur-md p-2 rounded border shadow-lg relative overflow-hidden",
-                                        n.type === 'CE' ? "border-emerald-500/30" : "border-purple-500/30"
-                                    )}
-                                >
-                                    {/* Accent Glow */}
-                                    <div className={cn("absolute inset-0 opacity-10",
-                                        n.type === 'CE' ? "bg-emerald-500" : "bg-purple-500")}
-                                    />
+                {/* Volume unit filter */}
+                <div className="flex items-center gap-1.5 bg-white/[0.04] border border-white/10 rounded px-2 h-8">
+                    <span className="text-[9px] font-black text-white/40 uppercase tracking-wider">Vol Unit</span>
+                    <select
+                        value={volumeUnit}
+                        onChange={(e) => setVolumeUnit(e.target.value)}
+                        className="bg-transparent text-[12px] font-black text-violet-300 font-mono tabular-nums focus:outline-none cursor-pointer"
+                    >
+                        {VOLUME_UNIT_OPTIONS.map(o => (
+                            <option key={o.value} value={o.value} className="bg-[#0a0a0e] text-violet-300">
+                                {o.label}
+                            </option>
+                        ))}
+                    </select>
+                </div>
 
-                                    <div className="flex gap-2 relative z-10">
-                                        <div className={cn("mt-1 w-1.5 h-1.5 rounded-full flex-shrink-0 animate-pulse",
-                                            n.type === 'CE' ? "bg-emerald-400" : "bg-purple-400")}
-                                        />
-                                        <div className="flex-1 min-w-0">
-                                            <div className="flex justify-between items-start mb-0.5">
-                                                <h4 className={cn("font-bold text-[9px] uppercase tracking-tight",
-                                                    n.type === 'CE' ? "text-emerald-400" : "text-purple-400")}>
-                                                    Big Order
-                                                </h4>
-                                                <span className="text-[8px] text-white/30 font-mono">{n.time}</span>
-                                            </div>
-                                            <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-[9px]">
-                                                <span className="text-white/40">Sym</span>
-                                                <span className={cn("text-right font-bold truncate",
-                                                    n.type === 'CE' ? "text-emerald-400" : "text-purple-400")}>
-                                                    {n.strike} {n.type}
-                                                </span>
-                                                <span className="text-white/40">Prc</span>
-                                                <span className="text-right font-mono text-white/60">{Number(n.price).toFixed(2)}</span>
-                                                <span className="text-white/40">Qty</span>
-                                                <span className="text-right text-yellow-500 font-bold">{n.observedQty}</span>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </motion.div>
-                            ))}
-                        </AnimatePresence>
-                        {activeNotifications.length === 0 && (
-                            <div className="h-full flex flex-col items-center justify-center opacity-10 py-8">
-                                <Database size={24} />
-                                <span className="text-[9px] mt-2">No active alerts</span>
+                {/* Add Stock has moved to the monitor tab bar below. */}
+
+                {/* Right cluster: Demo toggle, clock, status + connect/disconnect + clear */}
+                <div className="ml-auto flex items-center gap-2">
+                    {/* Demo toggle disabled — dummy data feature removed. */}
+                    {/*
+                    <button
+                        onClick={() => setDemoMode(d => !d)}
+                        className={cn(
+                            "flex items-center gap-1.5 border font-bold py-1 px-2.5 rounded text-[11px] uppercase tracking-wider h-8 transition-all",
+                            demoMode
+                                ? "bg-amber-500/15 border-amber-500/40 text-amber-300 shadow-[0_0_10px_rgba(251,191,36,0.25)]"
+                                : "bg-white/5 border-white/10 text-white/50 hover:text-white/80"
+                        )}
+                        title={demoMode ? "Demo data is ON — click to use live feed" : "Use synthetic dummy data"}
+                    >
+                        <FlaskConical size={12} /> Demo {demoMode ? "ON" : "OFF"}
+                    </button>
+                    */}
+
+                    {/* Live clock */}
+                    <div className="flex items-center bg-white/[0.04] border border-white/10 rounded px-2.5 h-8">
+                        <span className="text-[14px] font-black text-emerald-300 font-mono tabular-nums tracking-tight">
+                            {clockStr}
+                        </span>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 text-[10px] text-white/40">
+                        <div className={cn("w-1.5 h-1.5 rounded-full",
+                            status === 'connected' ? 'bg-emerald-400 animate-pulse' :
+                                status === 'connecting' ? 'bg-yellow-400 animate-pulse' : 'bg-red-500')} />
+                        <span className="font-bold uppercase tracking-wider">{status}</span>
+                    </div>
+                    <button
+                        onClick={() => setIsWsEnabled(!isWsEnabled)}
+                        className={cn(
+                            "text-[10px] px-3 py-1 rounded border transition-all font-bold uppercase tracking-wider",
+                            isWsEnabled
+                                ? "bg-red-500/10 text-red-400 border-red-500/20 hover:bg-red-500/20"
+                                : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/20"
+                        )}
+                    >
+                        {isWsEnabled ? "Disconnect" : "Connect"}
+                    </button>
+                    <button
+                        onClick={handleClearAll}
+                        className="bg-red-500/10 text-red-500 hover:bg-red-500/20 border border-red-500/20 font-bold py-1 px-3 rounded text-[10px] flex items-center gap-2 uppercase tracking-wider"
+                    >
+                        <Trash2 size={11} /> Clear
+                    </button>
+
+                    {/* Signed-in user chip + logout */}
+                    <div className="flex items-center gap-1.5 bg-white/[0.04] border border-white/10 rounded h-8 pl-1 pr-1">
+                        {user.picture ? (
+                            <img
+                                src={user.picture}
+                                alt=""
+                                className="w-6 h-6 rounded-full border border-white/10"
+                                referrerPolicy="no-referrer"
+                            />
+                        ) : (
+                            <div className="w-6 h-6 rounded-full bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-[10px] font-black text-emerald-300">
+                                {(user.name || user.email || '?').charAt(0).toUpperCase()}
                             </div>
                         )}
+                        <span className="text-[10px] font-bold text-white/60 max-w-[110px] truncate" title={user.email}>
+                            {user.name || user.email}
+                        </span>
+                        <button
+                            onClick={logout}
+                            title="Sign out"
+                            className="ml-1 p-1 rounded hover:bg-white/10 text-white/40 hover:text-red-400 transition-colors"
+                        >
+                            <LogOut size={12} />
+                        </button>
                     </div>
                 </div>
+            </header>
 
-                {/* Section 3: Elements (Visibility Control) */}
-                <div className="p-3 bg-black/20">
-                    <p className="text-[10px] uppercase text-white/20 font-bold tracking-wider mb-2 px-1">Elements</p>
-                    <div className="space-y-1">
-                        {sidebarElements.map(item => (
-                            <button
-                                key={item.id}
-                                onClick={() => toggleElement(item.id)}
-                                className="w-full flex items-center justify-between px-3 py-2 rounded-lg hover:bg-white/5 text-xs text-white/70 transition-colors"
+            {/* --- MONITOR TAB BAR --- */}
+            <div className="relative flex items-center gap-1 px-4 py-1 border-b border-white/10 bg-[#0a0a0e] flex-shrink-0 overflow-x-auto scrollbar-thin [&::-webkit-scrollbar]:h-1">
+                <span className="text-[9px] font-black text-white/30 uppercase tracking-wider mr-2 flex-shrink-0">
+                    Monitors
+                </span>
+                {monitors.map((m, idx) => (
+                    <button
+                        key={m.id}
+                        onClick={() => setActiveMonitorId(m.id)}
+                        className={cn(
+                            "flex items-center gap-1 px-3 py-1 rounded text-[11px] font-bold transition-colors h-7 flex-shrink-0 group",
+                            activeMonitorId === m.id
+                                ? "bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 shadow-[0_0_8px_rgba(52,211,153,0.15)]"
+                                : "bg-white/[0.04] border border-white/10 text-white/50 hover:bg-white/[0.08] hover:text-white/80"
+                        )}
+                    >
+                        <span>Monitor {idx + 1}</span>
+                        {monitors.length > 1 && (
+                            <span
+                                role="button"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleRemoveMonitor(m.id);
+                                }}
+                                className="ml-1 opacity-40 hover:opacity-100 hover:text-red-400 transition-colors"
+                                title="Remove monitor"
                             >
-                                <span>{item.label}</span>
-                                {currentSettings[item.id] ? <Eye size={14} className="text-blue-400" /> : <EyeOff size={14} className="text-white/20" />}
-                            </button>
-                        ))}
+                                <X size={10} />
+                            </span>
+                        )}
+                    </button>
+                ))}
+                <button
+                    onClick={handleAddMonitor}
+                    className="flex items-center gap-1 px-2 py-1 rounded border border-dashed border-white/15 text-white/40 hover:text-white hover:bg-white/5 text-[11px] font-bold h-7 flex-shrink-0"
+                    title="Add a new monitor session"
+                >
+                    <Plus size={11} /> Add Monitor
+                </button>
+
+                {/* ---------- ATM WIDGET (center of the monitor bar) ----------
+                    Absolutely centered so it stays in the middle regardless of
+                    how many monitor tabs are on the left or the Add Stock on
+                    the right. Shows NIFTY and SENSEX ATM CE/PE side-by-side,
+                    updating live from the WS depth feed. */}
+                <div className="absolute left-1/2 -translate-x-1/2 pointer-events-none flex items-center gap-2">
+                    {/* NIFTY block */}
+                    <div className="pointer-events-auto flex items-center gap-1.5 bg-gradient-to-r from-cyan-500/[0.06] to-transparent border border-cyan-500/30 rounded h-7 pl-2 pr-1.5">
+                        <div className="flex items-center gap-1">
+                            <span className="text-[9px] font-black text-cyan-400/90 uppercase tracking-wider">Nifty ATM</span>
+                            <span className="text-[10px] font-black text-white/50 font-mono tabular-nums">
+                                {niftyAtmStrike != null ? Math.round(niftyAtmStrike).toString() : '—'}
+                            </span>
+                        </div>
+                        <div className="flex items-center gap-1 pl-1.5 border-l border-cyan-500/20">
+                            <span className="text-[8px] font-black text-emerald-400/80 uppercase">CE</span>
+                            <span className="text-[12px] font-black text-emerald-300 font-mono tabular-nums min-w-[48px] text-right">
+                                {niftyCeLtp != null ? Number(niftyCeLtp).toFixed(2) : '—'}
+                            </span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                            <span className="text-[8px] font-black text-red-400/80 uppercase">PE</span>
+                            <span className="text-[12px] font-black text-red-300 font-mono tabular-nums min-w-[48px] text-right">
+                                {niftyPeLtp != null ? Number(niftyPeLtp).toFixed(2) : '—'}
+                            </span>
+                        </div>
+                    </div>
+
+                    {/* SENSEX block */}
+                    <div className="pointer-events-auto flex items-center gap-1.5 bg-gradient-to-r from-cyan-500/[0.06] to-transparent border border-cyan-500/30 rounded h-7 pl-2 pr-1.5">
+                        <div className="flex items-center gap-1">
+                            <span className="text-[9px] font-black text-cyan-400/90 uppercase tracking-wider">Sensex ATM</span>
+                            <span className="text-[10px] font-black text-white/50 font-mono tabular-nums">
+                                {sensexAtmStrike != null ? Math.round(sensexAtmStrike).toString() : '—'}
+                            </span>
+                        </div>
+                        <div className="flex items-center gap-1 pl-1.5 border-l border-cyan-500/20">
+                            <span className="text-[8px] font-black text-emerald-400/80 uppercase">CE</span>
+                            <span className="text-[12px] font-black text-emerald-300 font-mono tabular-nums min-w-[48px] text-right">
+                                {sensexCeLtp != null ? Number(sensexCeLtp).toFixed(2) : '—'}
+                            </span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                            <span className="text-[8px] font-black text-red-400/80 uppercase">PE</span>
+                            <span className="text-[12px] font-black text-red-300 font-mono tabular-nums min-w-[48px] text-right">
+                                {sensexPeLtp != null ? Number(sensexPeLtp).toFixed(2) : '—'}
+                            </span>
+                        </div>
                     </div>
                 </div>
-            </aside>
 
-            {/* --- MAIN CONTENT --- */}
-            <main className="flex-1 relative overflow-hidden bg-[#050505] p-3">
+                {/* Add Stock — pinned to the FAR RIGHT of the monitor tab bar
+                    via `ml-auto`. Acts on the active monitor. */}
+                <div className="relative ml-auto flex-shrink-0" ref={dropdownRef}>
+                    <button
+                        onClick={() => setDropdownOpen(o => !o)}
+                        className="flex items-center gap-1.5 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 text-blue-300 font-bold py-1 px-3 rounded text-[11px] uppercase tracking-wider h-7"
+                    >
+                        <Plus size={11} /> Add Stock
+                    </button>
+
+                    {dropdownOpen && (
+                        <div className="absolute top-full right-0 mt-2 w-72 bg-[#0f1115] border border-white/10 rounded-lg shadow-2xl z-50 overflow-hidden">
+                            <div className="p-2 border-b border-white/10">
+                                <div className="flex items-center gap-2 bg-white/5 border border-white/10 rounded px-2 py-1">
+                                    <Search size={12} className="text-white/30" />
+                                    <input
+                                        autoFocus
+                                        type="text"
+                                        value={search}
+                                        onChange={(e) => setSearch(e.target.value)}
+                                        placeholder="Search NSE symbol…"
+                                        className="bg-transparent border-none flex-1 text-[12px] text-white placeholder-white/20 focus:outline-none"
+                                    />
+                                </div>
+                            </div>
+                            <div className="max-h-72 overflow-y-auto scrollbar-thin">
+                                {filteredSymbols.length === 0 ? (
+                                    <div className="text-[11px] text-white/30 italic text-center py-4">
+                                        No matches
+                                    </div>
+                                ) : (
+                                    filteredSymbols.map(sym => (
+                                        <button
+                                            key={sym}
+                                            onClick={() => {
+                                                handleAddExtraStockToActive(sym);
+                                                setDropdownOpen(false);
+                                                setSearch('');
+                                            }}
+                                            className="w-full text-left px-3 py-1.5 text-[12px] text-white/70 hover:bg-blue-500/10 hover:text-white font-mono tabular-nums transition-colors"
+                                        >
+                                            {sym}
+                                        </button>
+                                    ))
+                                )}
+                            </div>
+                            {activeExtraStocks.length > 0 && (
+                                <div className="border-t border-white/10 p-2 max-h-32 overflow-y-auto scrollbar-none">
+                                    <div className="text-[9px] uppercase text-white/30 font-bold mb-1 px-1">Currently added (this monitor)</div>
+                                    <div className="flex flex-wrap gap-1">
+                                        {activeExtraStocks.map(es => (
+                                            <button
+                                                key={es.symbol}
+                                                onClick={() => handleRemoveExtraStockFromMonitor(activeMonitorId, es.symbol)}
+                                                className="flex items-center gap-1 bg-white/5 hover:bg-red-500/15 border border-white/10 hover:border-red-500/30 rounded px-1.5 py-0.5 text-[10px] text-white/70 hover:text-red-300 font-mono"
+                                                title="Remove"
+                                            >
+                                                {es.symbol} <X size={9} />
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </div>
+            </div>
+
+            {/* --- MAIN CONTENT ---
+                All monitors are mounted at once so every monitor keeps
+                processing WS packets in the background. Only the active one
+                is visible. MonitorDashboard already handles display via its
+                own `isActive` prop (toggles between flex and hidden). */}
+            <main className="flex-1 relative overflow-hidden bg-[#050505] p-3 min-h-0">
                 {monitors.map(m => (
                     <MonitorDashboard
                         key={m.id}
                         id={m.id}
-                        isActive={activeMonitorId === m.id}
-                        depthData={depthData}
+                        isActive={m.id === activeMonitorId}
+                        depthData={effectiveDepth}
                         status={status}
                         subscribe={subscribe}
-                        addGlobalNotification={addGlobalNotification}
-                        visibleElements={monitorSettings[m.id]}
-                        onRemove={handleRemoveMonitor}
-                        layoutMode={monitorLayouts[m.id] || 'original'}
-                        onLayoutChange={(mode) => setMonitorLayouts(prev => ({ ...prev, [m.id]: mode }))}
-                        depthEvents={depthEvents.current} // Pass Event Bus
-                        isSidebarVisible={isSidebarVisible} // Pass Sidebar State
-                        onToggleSidebar={setSidebarCollapsed} // Pass Sidebar Toggle
+                        addGlobalNotification={() => {}}
+                        visibleElements={{ config: false, ceDepth: false, peDepth: false, logs: false }}
+                        onRemove={() => {}}
+                        layoutMode={'vertical'}
+                        onLayoutChange={() => {}}
+                        depthEvents={depthEvents.current}
+                        isSidebarVisible={false}
+                        onToggleSidebar={() => {}}
+                        extraStocks={extraStocksByMonitor[m.id] || []}
+                        onRemoveExtraStock={(sym) => handleRemoveExtraStockFromMonitor(m.id, sym)}
+                        bucketSize={bucketSizeByMonitor[m.id] || 1}
+                        volumeUnit={volumeUnit}
+                        monitorId={m.id}
+                        marketOpen={marketOpen}
                     />
                 ))}
+
+                {/* Market-closed overlay — shown from 15:32 IST through 09:15
+                    IST the next weekday, and all weekend. Dismissible via
+                    the Dismiss button; the dismissed state resets the next
+                    time the market actually opens. */}
+                {!marketOpen && !marketClosedDismissed && (
+                    <div className="absolute inset-0 z-[60] flex items-center justify-center bg-black/75 backdrop-blur-sm pointer-events-auto">
+                        <div className="relative px-8 py-6 rounded-2xl border-2 border-red-500/40 bg-[#0f1115]/95 shadow-[0_0_60px_rgba(239,68,68,0.25)] text-center">
+                            {/* Dismiss button */}
+                            <button
+                                onClick={() => setMarketClosedDismissed(true)}
+                                className="absolute top-2 right-2 p-1 rounded hover:bg-white/10 text-white/40 hover:text-white/80 transition-colors"
+                                title="Dismiss"
+                            >
+                                <X size={14} />
+                            </button>
+
+                            <div className="flex items-center justify-center gap-2 mb-2">
+                                <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                                <span className="text-[10px] font-black text-red-400/80 uppercase tracking-widest">NSE</span>
+                            </div>
+                            <div className="text-[32px] font-black text-red-300 tracking-tight leading-none">
+                                Market Closed
+                            </div>
+                            <div className="text-[11px] font-black uppercase tracking-wider text-red-400/70 mt-2">
+                                System stopped · WebSocket disconnected
+                            </div>
+                            <div className="text-[11px] font-mono text-white/40 mt-3 tabular-nums">
+                                {clockStr} IST · {clock.toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short' })}
+                            </div>
+                            <div className="text-[10px] text-white/30 mt-2 uppercase tracking-wider">
+                                Trading hours: Mon–Fri · 09:15 → 15:32 IST
+                            </div>
+
+                            <button
+                                onClick={() => setMarketClosedDismissed(true)}
+                                className="mt-4 px-4 py-1.5 rounded border border-white/15 bg-white/[0.04] hover:bg-white/[0.08] text-[11px] font-bold text-white/70 hover:text-white uppercase tracking-wider transition-colors"
+                            >
+                                Dismiss
+                            </button>
+                        </div>
+                    </div>
+                )}
             </main>
         </div>
     );
 };
 
 export default App;
-
-

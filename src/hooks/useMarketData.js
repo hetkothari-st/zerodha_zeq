@@ -1,12 +1,30 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 
-const WS_URL = 'ws://115.242.15.134:19101';
-const LOGIN_DATA = {
-    LoginId: "ziptestnew",
-    Password: "ziptestnew"
+// WebSocket endpoint resolution:
+//   - In the browser on production (HTTPS), hit /ws on the same origin so the
+//     Node server on Railway can proxy to the broker over plain TCP. This
+//     avoids the mixed-content block browsers put on ws:// from an https:
+//     page.
+//   - In local Vite dev (http://localhost:5292), ALSO hit /ws — vite.config.js
+//     proxies it straight to the broker, so dev behaves identically to prod
+//     without needing the Node server running.
+//   - If something non-browser (SSR, tests) imports this, fall back to the
+//     direct broker URL.
+const resolveWsUrl = () => {
+    if (typeof window !== 'undefined' && window.location) {
+        const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        return `${scheme}//${window.location.host}/ws`;
+    }
+    return 'ws://115.242.15.134:19101';
 };
 
-export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = null) => {
+const WS_URL = resolveWsUrl();
+
+// Credentials are now passed in per hook invocation. Each call site builds
+// a fresh unique string via buildWsCredential(user) (see src/auth/AuthContext)
+// and hands it to us. The same value goes into both LoginId and Password,
+// per the broker's "any text, must be unique per session" contract.
+export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = null, wsCredential = null) => {
     const [status, setStatus] = useState('disconnected');
     const [depthData, setDepthData] = useState({});
 
@@ -18,6 +36,7 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
     const onMessageRef = useRef(onMessage);
     const onDepthPacketRef = useRef(onDepthPacket);
     const enabledRef = useRef(enabled);
+    const wsCredentialRef = useRef(wsCredential);
     const isLoggedIn = useRef(false);
     const isReady = useRef(false);
     const pendingSubs = useRef([]);
@@ -33,7 +52,8 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
         onMessageRef.current = onMessage;
         onDepthPacketRef.current = onDepthPacket;
         enabledRef.current = enabled;
-    }, [onMessage, onDepthPacket, enabled]);
+        wsCredentialRef.current = wsCredential;
+    }, [onMessage, onDepthPacket, enabled, wsCredential]);
 
     const connect = useCallback(() => {
         if (ws.current) {
@@ -48,9 +68,13 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
         ws.current.onopen = () => {
             console.log('[WS] Connected, authenticating...');
             setStatus('connected');
+            // Build LoginId/Password from the caller-supplied credential.
+            // Both fields receive the same string, which is already guaranteed
+            // unique per session by buildWsCredential().
+            const cred = wsCredentialRef.current || `anon_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
             ws.current.send(JSON.stringify({
                 Type: "Login",
-                Data: LOGIN_DATA
+                Data: { LoginId: cred, Password: cred }
             }));
         };
 
@@ -73,16 +97,19 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
                         );
 
                         // 1. Separate tokens by Exchange
-                        // NSEFO -> FeedType 2 (Depth)
-                        // NSE (Indices) -> FeedType 1 (Touchline)
+                        // NSEFO / BSEFO -> FeedType 2 (Depth) — options on both exchanges
+                        // NSE / BSE / NSECM / BSECM -> FeedType 1 (Touchline / MarketData)
                         const allTokens = [...activeQuotes, ...freshQuotes];
-                        const depthTokens = allTokens.filter(q => q.Xchg === 'NSEFO');
+                        const depthTokens = allTokens.filter(
+                            q => q.Xchg === 'NSEFO' || q.Xchg === 'BSEFO'
+                        );
 
                         const indexTokens = [
                             { Tkn: '26000', Xchg: 'NSE' },
                             { Tkn: '26009', Xchg: 'NSE' },
-                            ...allTokens.filter(q => q.Xchg === 'NSE')
-                        ].filter((v, i, a) => a.findIndex(t => t.Tkn === v.Tkn) === i); // Deduplicate
+                            { Tkn: '1', Xchg: 'BSE' }, // SENSEX Spot Token
+                            ...allTokens.filter(q => ['NSE', 'BSE', 'NSECM', 'BSECM'].includes(q.Xchg))
+                        ].filter((v, i, a) => a.findIndex(t => t.Tkn === v.Tkn && t.Xchg === v.Xchg) === i); // Deduplicate
 
                         // Send Depth Sub
                         if (depthTokens.length > 0) {
@@ -124,8 +151,8 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
                     return;
                 }
 
-                // 2. Buffer Depth & Index Data
-                if ((Type === 'Depth' || Type === 'DepthData' || Type === 'IndexData') && Data) {
+                // 2. Buffer Depth & Index/MarketData Data
+                if ((Type === 'Depth' || Type === 'DepthData' || Type === 'IndexData' || Type === 'MarketData') && Data) {
 
                     // Normalize Data to Array for uniform processing
                     const packets = Array.isArray(Data) ? Data : [Data];
@@ -143,16 +170,22 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
 
                         if (token) {
                             const tknStr = String(token);
-                            lastPacketTimes.current.set(tknStr, Date.now());
-                            depthBuffer.current[tknStr] = {
+                            const receivedAt = Date.now();
+                            lastPacketTimes.current.set(tknStr, receivedAt);
+                            const enriched = {
                                 ...packet,
-                                _type: Type, // Help UI distinguish
-                                _receivedAt: Date.now()
+                                Tkn: tknStr,           // ensure Tkn is always set (IndexData often lacks it)
+                                _type: Type,
+                                _receivedAt: receivedAt,
                             };
+                            depthBuffer.current[tknStr] = enriched;
 
-                            // Direct Audio Link (only for Depth)
-                            if ((Type === 'Depth' || Type === 'DepthData') && onDepthPacketRef.current) {
-                                onDepthPacketRef.current(packet);
+                            // Fire packet callback for ALL data types so consumers
+                            // can drive their own bucketing from event-driven WS
+                            // messages instead of throttled setInterval polling.
+                            // (Depth, DepthData, IndexData, MarketData all flow through.)
+                            if (onDepthPacketRef.current) {
+                                onDepthPacketRef.current(enriched);
                             }
 
                             // Telemetry tracking

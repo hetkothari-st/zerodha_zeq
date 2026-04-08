@@ -114,7 +114,13 @@ const MonitorDashboard = ({
 
     depthEvents, // Low-latency event bus
     isSidebarVisible, // New prop
-    onToggleSidebar // New prop
+    onToggleSidebar, // New prop
+    extraStocks,         // [{ symbol }] from App.jsx dropdown
+    onRemoveExtraStock,  // (symbol) => void
+    bucketSize,          // 1 | 5 | 10 | 15 | 30 (minutes per row/bar)
+    volumeUnit,          // 'auto' | 'K' | 'L' | 'Cr'
+    monitorId,           // which monitor / session this instance belongs to
+    marketOpen,          // false during non-trading hours / weekends
 }) => {
     // --- Layout State is now controlled by Parent (App.jsx) ---
 
@@ -165,7 +171,7 @@ const MonitorDashboard = ({
 
     // --- Direct Audio Link (Low Latency) ---
     useEffect(() => {
-        if (!depthEvents) return;
+        if (!depthEvents || !isActive) return;
 
         const handlePacket = (e) => {
             const packet = e.detail;
@@ -205,7 +211,7 @@ const MonitorDashboard = ({
 
         depthEvents.addEventListener('depth-packet', handlePacket);
         return () => depthEvents.removeEventListener('depth-packet', handlePacket);
-    }, [depthEvents, monitoredTokens]); // Re-bind when monitored list changes
+    }, [depthEvents, monitoredTokens, isActive]); // Re-bind when monitored list changes
 
     // --- Polling & Alert Logic (Visuals Only) ---
     const latestDepthData = useRef(depthData);
@@ -304,8 +310,8 @@ const MonitorDashboard = ({
 
                             setLogs(prev => [{ ...details, id: logId }, ...prev].slice(0, 3000)); // Increased buffer to 3000
 
-                            // Global Notification (still throttled by log logic)
-                            if (observedQty >= item.quantity) {
+                            // Global Notification — only for active monitor
+                            if (observedQty >= item.quantity && isActive) {
                                 addGlobalNotification({ ...details, id: logId });
                             }
                         }
@@ -315,7 +321,7 @@ const MonitorDashboard = ({
         }, 100);
 
         return () => clearInterval(pollInterval);
-    }, [monitoredTokens, showAllPrices, addGlobalNotification, status]);
+    }, [monitoredTokens, showAllPrices, addGlobalNotification, status, isActive]);
 
     // --- Log Retention & Cleanup ---
     useEffect(() => {
@@ -427,44 +433,26 @@ const MonitorDashboard = ({
         <div className={cn("flex flex-col h-full overflow-hidden relative", isActive ? "flex" : "hidden")}>
 
 
-            {layoutMode === 'original' ? (
-                <OriginalLayout
-                    visibleElements={visibleElements}
-                    monitoredTokens={monitoredTokens}
-                    depthData={depthData}
-                    logs={logs}
-                    onAddTokens={handleAddTokens}
-                    onRemoveToken={handleRemoveToken}
-                    onClearTokens={handleClearAllTokens}
-                    onUpdateTokenQty={handleUpdateTokenQty}
-                    onUpdateTokenStrike={handleUpdateTokenStrike}
-                    onUpdateTokenType={handleUpdateTokenType}
-                    // Pass down logic state for the config bar toggle
-                    showAllPrices={showAllPrices}
-                    setShowAllPrices={setShowAllPrices}
-                    isSidebarVisible={isSidebarVisible}
-                    onToggleSidebar={onToggleSidebar}
-                />
-            ) : (
-                <VerticalLayout
-                    visibleElements={visibleElements}
-                    monitoredTokens={monitoredTokens}
-                    logs={logs}
-                    onAddTokens={handleAddTokens}
-                    onRemoveToken={handleRemoveToken}
-                    onClearTokens={handleClearAllTokens}
-                    onUpdateTokenQty={handleUpdateTokenQty}
-                    onUpdateTokenStrike={handleUpdateTokenStrike}
-                    onUpdateTokenType={handleUpdateTokenType}
-                    onUpdateTokenWidth={handleUpdateTokenWidth}
-                    onClearLogs={handleClearLogs}
-                    showAllPrices={showAllPrices}
-                    setShowAllPrices={setShowAllPrices}
-                    onReorderTokens={setMonitoredTokens} // Pass drag-and-drop handler
-                    isSidebarVisible={isSidebarVisible}
-                    depthData={depthData}
-                />
-            )}
+            {/*
+              OriginalLayout is currently disabled — only the VerticalLayout
+              (per-minute cumulative volume for stocks/indices) is rendered.
+              To re-enable the original options layout, restore the
+              `layoutMode === 'original'` branch that lived here.
+            */}
+            <VerticalLayout
+                visibleElements={visibleElements}
+                isSidebarVisible={isSidebarVisible}
+                depthData={depthData}
+                subscribe={subscribe}
+                extraStocks={extraStocks}
+                onRemoveExtraStock={onRemoveExtraStock}
+                bucketSize={bucketSize}
+                volumeUnit={volumeUnit}
+                wsStatus={status}
+                depthEvents={depthEvents}
+                monitorId={monitorId}
+                marketOpen={marketOpen}
+            />
         </div>
     );
 };
