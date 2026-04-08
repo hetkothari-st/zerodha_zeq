@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef, useLayoutEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { Trash2, Activity, Plus, Search, X, FlaskConical, LogOut } from 'lucide-react';
 import { useMarketData } from './hooks/useMarketData';
 import MonitorDashboard from './components/MonitorDashboard';
@@ -828,15 +829,45 @@ const AuthedApp = ({ user, logout }) => {
     const declinePct = adTotal > 0 ? 100 - advancePct : 50;
 
     // ---------- Stock dropdown ----------
+    // The dropdown is rendered in a React portal (document.body) with
+    // position:fixed coordinates derived from the anchor button's bounding
+    // rect. Why: the monitor tab bar uses overflow-x-auto, which per the CSS
+    // spec also implies overflow-y: auto, so an in-place `absolute top-full`
+    // dropdown gets clipped by the 28px-tall bar and is invisible/unclickable.
+    // Escaping to document.body sidesteps the clipping entirely.
     const [dropdownOpen, setDropdownOpen] = useState(false);
     const [search, setSearch] = useState('');
-    const dropdownRef = useRef(null);
+    const [anchorRect, setAnchorRect] = useState(null);
+    const anchorRef = useRef(null);       // the Add Stock button
+    const popoverRef = useRef(null);      // the portal dropdown element
 
+    // Recompute anchor position when opening, and on window resize/scroll
+    // while open so the popover stays glued to the button.
+    useLayoutEffect(() => {
+        if (!dropdownOpen) return;
+        const update = () => {
+            if (anchorRef.current) {
+                setAnchorRect(anchorRef.current.getBoundingClientRect());
+            }
+        };
+        update();
+        window.addEventListener('resize', update);
+        window.addEventListener('scroll', update, true);
+        return () => {
+            window.removeEventListener('resize', update);
+            window.removeEventListener('scroll', update, true);
+        };
+    }, [dropdownOpen]);
+
+    // Click-outside close: consider both the anchor button AND the portal
+    // popover as "inside" so clicking an option inside the portal doesn't
+    // immediately close the dropdown before the onClick fires.
     useEffect(() => {
         const onDoc = (e) => {
-            if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
-                setDropdownOpen(false);
-            }
+            const t = e.target;
+            if (anchorRef.current && anchorRef.current.contains(t)) return;
+            if (popoverRef.current && popoverRef.current.contains(t)) return;
+            setDropdownOpen(false);
         };
         if (dropdownOpen) document.addEventListener('mousedown', onDoc);
         return () => document.removeEventListener('mousedown', onDoc);
@@ -1138,70 +1169,82 @@ const AuthedApp = ({ user, logout }) => {
 
                 {/* Add Stock — pinned to the FAR RIGHT of the monitor tab bar
                     via `ml-auto`. Acts on the active monitor. */}
-                <div className="relative ml-auto flex-shrink-0" ref={dropdownRef}>
+                <div className="ml-auto flex-shrink-0">
                     <button
+                        ref={anchorRef}
                         onClick={() => setDropdownOpen(o => !o)}
                         className="flex items-center gap-1.5 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 text-blue-300 font-bold py-1 px-3 rounded text-[11px] uppercase tracking-wider h-7"
                     >
                         <Plus size={11} /> Add Stock
                     </button>
+                </div>
 
-                    {dropdownOpen && (
-                        <div className="absolute top-full right-0 mt-2 w-72 bg-[#0f1115] border border-white/10 rounded-lg shadow-2xl z-50 overflow-hidden">
-                            <div className="p-2 border-b border-white/10">
-                                <div className="flex items-center gap-2 bg-white/5 border border-white/10 rounded px-2 py-1">
-                                    <Search size={12} className="text-white/30" />
-                                    <input
-                                        autoFocus
-                                        type="text"
-                                        value={search}
-                                        onChange={(e) => setSearch(e.target.value)}
-                                        placeholder="Search NSE symbol…"
-                                        className="bg-transparent border-none flex-1 text-[12px] text-white placeholder-white/20 focus:outline-none"
-                                    />
-                                </div>
+                {/* Portal-rendered dropdown. Escapes the monitor tab bar's
+                    overflow-x-auto clipping context. Positioned via fixed
+                    coords from anchorRect (tracked in a useLayoutEffect). */}
+                {dropdownOpen && anchorRect && createPortal(
+                    <div
+                        ref={popoverRef}
+                        className="fixed w-72 bg-[#0f1115] border border-white/10 rounded-lg shadow-2xl z-[1000] overflow-hidden"
+                        style={{
+                            top: anchorRect.bottom + 8,
+                            left: Math.max(8, Math.min(anchorRect.right - 288, window.innerWidth - 296)),
+                        }}
+                    >
+                        <div className="p-2 border-b border-white/10">
+                            <div className="flex items-center gap-2 bg-white/5 border border-white/10 rounded px-2 py-1">
+                                <Search size={12} className="text-white/30" />
+                                <input
+                                    autoFocus
+                                    type="text"
+                                    value={search}
+                                    onChange={(e) => setSearch(e.target.value)}
+                                    placeholder="Search NSE symbol…"
+                                    className="bg-transparent border-none flex-1 text-[12px] text-white placeholder-white/20 focus:outline-none"
+                                />
                             </div>
-                            <div className="max-h-72 overflow-y-auto scrollbar-thin">
-                                {filteredSymbols.length === 0 ? (
-                                    <div className="text-[11px] text-white/30 italic text-center py-4">
-                                        No matches
-                                    </div>
-                                ) : (
-                                    filteredSymbols.map(sym => (
-                                        <button
-                                            key={sym}
-                                            onClick={() => {
-                                                handleAddExtraStockToActive(sym);
-                                                setDropdownOpen(false);
-                                                setSearch('');
-                                            }}
-                                            className="w-full text-left px-3 py-1.5 text-[12px] text-white/70 hover:bg-blue-500/10 hover:text-white font-mono tabular-nums transition-colors"
-                                        >
-                                            {sym}
-                                        </button>
-                                    ))
-                                )}
-                            </div>
-                            {activeExtraStocks.length > 0 && (
-                                <div className="border-t border-white/10 p-2 max-h-32 overflow-y-auto scrollbar-none">
-                                    <div className="text-[9px] uppercase text-white/30 font-bold mb-1 px-1">Currently added (this monitor)</div>
-                                    <div className="flex flex-wrap gap-1">
-                                        {activeExtraStocks.map(es => (
-                                            <button
-                                                key={es.symbol}
-                                                onClick={() => handleRemoveExtraStockFromMonitor(activeMonitorId, es.symbol)}
-                                                className="flex items-center gap-1 bg-white/5 hover:bg-red-500/15 border border-white/10 hover:border-red-500/30 rounded px-1.5 py-0.5 text-[10px] text-white/70 hover:text-red-300 font-mono"
-                                                title="Remove"
-                                            >
-                                                {es.symbol} <X size={9} />
-                                            </button>
-                                        ))}
-                                    </div>
+                        </div>
+                        <div className="max-h-72 overflow-y-auto scrollbar-thin">
+                            {filteredSymbols.length === 0 ? (
+                                <div className="text-[11px] text-white/30 italic text-center py-4">
+                                    No matches
                                 </div>
+                            ) : (
+                                filteredSymbols.map(sym => (
+                                    <button
+                                        key={sym}
+                                        onClick={() => {
+                                            handleAddExtraStockToActive(sym);
+                                            setDropdownOpen(false);
+                                            setSearch('');
+                                        }}
+                                        className="w-full text-left px-3 py-1.5 text-[12px] text-white/70 hover:bg-blue-500/10 hover:text-white font-mono tabular-nums transition-colors"
+                                    >
+                                        {sym}
+                                    </button>
+                                ))
                             )}
                         </div>
-                    )}
-                </div>
+                        {activeExtraStocks.length > 0 && (
+                            <div className="border-t border-white/10 p-2 max-h-32 overflow-y-auto scrollbar-none">
+                                <div className="text-[9px] uppercase text-white/30 font-bold mb-1 px-1">Currently added (this monitor)</div>
+                                <div className="flex flex-wrap gap-1">
+                                    {activeExtraStocks.map(es => (
+                                        <button
+                                            key={es.symbol}
+                                            onClick={() => handleRemoveExtraStockFromMonitor(activeMonitorId, es.symbol)}
+                                            className="flex items-center gap-1 bg-white/5 hover:bg-red-500/15 border border-white/10 hover:border-red-500/30 rounded px-1.5 py-0.5 text-[10px] text-white/70 hover:text-red-300 font-mono"
+                                            title="Remove"
+                                        >
+                                            {es.symbol} <X size={9} />
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>,
+                    document.body
+                )}
             </div>
 
             {/* --- MAIN CONTENT ---

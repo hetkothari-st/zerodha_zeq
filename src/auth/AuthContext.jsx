@@ -12,8 +12,22 @@
 // treat this as authorization for any sensitive backend call.
 
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { setUserNamespace } from './userStorage';
 
 const STORAGE_KEY = 'funnel_eq_auth_user';
+
+// Activate the per-user namespace immediately on module load — BEFORE any
+// component mounts and reads localStorage. This covers the page-reload case:
+// if a user is already persisted in localStorage, we set the namespace right
+// now so that all subsequent mt_/vl_/nifty_baseline reads land in that user's
+// bucket from the very first render.
+try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+        const u = JSON.parse(raw);
+        if (u?.email) setUserNamespace(u.email);
+    }
+} catch {}
 
 const AuthContext = createContext(null);
 
@@ -34,8 +48,21 @@ export function AuthProvider({ children }) {
         } catch {}
     }, [user]);
 
-    const login = useCallback((u) => setUser(u), []);
-    const logout = useCallback(() => setUser(null), []);
+    // Flip the storage namespace SYNCHRONOUSLY (before React re-renders) so
+    // the new user's first render already reads from their own bucket.
+    const login = useCallback((u) => {
+        if (u?.email) setUserNamespace(u.email);
+        setUser(u);
+    }, []);
+
+    // On logout we clear the namespace pointer. We do NOT wipe the logged-out
+    // user's namespaced keys — they belong to that user and should be there
+    // the next time they log back in. The shim + namespace switch is what
+    // gives each user their own persistent, private session.
+    const logout = useCallback(() => {
+        setUserNamespace(null);
+        setUser(null);
+    }, []);
 
     return (
         <AuthContext.Provider value={{ user, login, logout }}>

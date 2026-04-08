@@ -71,18 +71,19 @@ export default function LoginPage() {
 
             <div className="relative w-full max-w-sm">
                 {/* Brand header */}
-                <div className="text-center mb-6">
-                    <div className="inline-flex items-center gap-2 mb-2">
+                <div className="text-center mb-8">
+                    <div className="inline-flex items-center gap-2 mb-4">
                         <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                        <span className="text-[10px] font-black text-emerald-400 uppercase tracking-[0.2em]">
-                            Funnel EQ
+                        <span className="text-[10px] font-black text-emerald-400 uppercase tracking-[0.25em]">
+                            Live Market Monitor
                         </span>
                     </div>
-                    <h1 className="text-2xl font-black text-white tracking-tight">
-                        Sign in to continue
+                    <h1 className="text-6xl md:text-7xl font-black text-white tracking-tight leading-none">
+                        FUNNEL
+                        <span className="bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent"> EQ</span>
                     </h1>
-                    <p className="text-[12px] text-white/40 mt-1">
-                        Subscription-gated market monitor
+                    <p className="text-[13px] text-white/40 mt-4">
+                        Sign in to continue
                     </p>
                 </div>
 

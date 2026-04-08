@@ -3,7 +3,14 @@ import ReactDOM from 'react-dom/client'
 import { GoogleOAuthProvider } from '@react-oauth/google'
 import App from './App.jsx'
 import { AuthProvider } from './auth/AuthContext.jsx'
+import { installUserStorageShim } from './auth/userStorage.js'
 import './index.css'
+
+// Install the localStorage per-user namespace shim BEFORE any React code runs.
+// This way every subsequent get/set/remove on mt_*, vl_*, or nifty_baseline*
+// keys is transparently rewritten to `u:<email>:<key>` based on the active
+// user (set via setUserNamespace() in AuthContext).
+installUserStorageShim();
 
 // Google Cloud project: "Smarttouch Funnel EQ"
 // Remember to add the deployed origin (e.g. https://funnel-eq.up.railway.app
