@@ -98,8 +98,17 @@ wss.on('connection', (client, req) => {
     });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
     console.log(`[server] listening on :${PORT}`);
     console.log(`[server] static dir: ${DIST_DIR}`);
     console.log(`[server] ws proxy:   /ws -> ${UPSTREAM_WS}`);
+
+    // Log the outbound IP so it can be whitelisted at the broker
+    try {
+        const res = await fetch('https://api.ipify.org');
+        const ip = await res.text();
+        console.log(`[server] outbound IP: ${ip}`);
+    } catch (e) {
+        console.warn('[server] could not resolve outbound IP:', e.message);
+    }
 });
