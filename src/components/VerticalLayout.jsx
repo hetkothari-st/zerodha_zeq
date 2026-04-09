@@ -584,9 +584,9 @@ const VolumeChart = memo(({ history }) => {
 
 // Resize bounds (px). The user can drag the right edge of any column between
 // these. ~5% bigger than the previous range.
-const COL_MIN_W = 200;
-const COL_MAX_W = 360;
-const COL_DEFAULT_W = 220;
+const COL_MIN_W = 170;
+const COL_MAX_W = 320;
+const COL_DEFAULT_W = 190;
 
 // Fixed pixel height for the per-column volume chart panel. Locked so every
 // column's chart looks identical, regardless of column height.
@@ -814,7 +814,7 @@ const TotalsColumn = ({ stocks, histories }) => {
 
     return (
         <div
-            style={{ flex: '0 0 240px', maxWidth: 260, minWidth: 220 }}
+            style={{ flex: '0 0 210px', maxWidth: 230, minWidth: 190 }}
             className="h-full flex flex-col bg-[#0f1115] border border-amber-500/30 rounded-lg shadow-xl relative"
         >
             {/* Header */}
@@ -980,7 +980,7 @@ const NetColumn = ({ stocks, histories }) => {
 
     return (
         <div
-            style={{ flex: '0 0 260px', maxWidth: 280, minWidth: 240 }}
+            style={{ flex: '0 0 230px', maxWidth: 250, minWidth: 210 }}
             className="h-full flex flex-col bg-[#0f1115] border border-yellow-500/30 rounded-lg shadow-xl relative"
         >
             {/* Header */}
