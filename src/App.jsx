@@ -481,29 +481,20 @@ const AuthedApp = ({ user, logout }) => {
     const niftyLtp = readLtp(effectiveDepth?.['26000']);
     const sensexLtp = readLtp(effectiveDepth?.['1']);
 
-    // ---------- ATM option widget (NIFTY / SENSEX CE+PE) ----------
-    // Build three things ONCE per mount (contracts file is static at runtime):
-    //   1. nearestExpiries — the nearest future expiry for NIFTY and BSX
-    //   2. availableStrikes — sorted integer arrays of every strike that
-    //      actually exists in contracts_nsefo.json for that expiry, separated
-    //      CE and PE (they're usually identical but we use CE as the source
-    //      of truth for strike matching).
-    // The ATM strike is then the element of `availableStrikes` closest to
-    // the current spot — NO hardcoded 50/100 step, so we can never produce
-    // a strike that doesn't exist as a listed contract.
-    const { nearestExpiries, availableStrikes } = useMemo(() => {
+    // ---------- ATM strike widget (NIFTY / SENSEX) ----------
+    // Build sorted strike arrays ONCE per mount from contracts_nsefo.json.
+    // The ATM strike is the element closest to the live spot — NO hardcoded
+    // 50/100 step, so we can never produce a non-existent strike.
+    const availableStrikes = useMemo(() => {
         const todayIso = new Date().toISOString().split('T')[0];
-        const expiries = {};
-        const strikes  = {};
+        const strikes = {};
         for (const symbol of ['NIFTY', 'BSX']) {
             const future = contractsData.filter(
                 c => c.s === symbol && (c.e || '') >= todayIso
             );
             const sortedExpiries = [...new Set(future.map(c => c.e))].sort();
             const nearest = sortedExpiries[0] || null;
-            expiries[symbol] = nearest;
             if (nearest) {
-                // Collect every CE strike at the nearest expiry, dedup, sort.
                 const set = new Set();
                 for (const c of future) {
                     if (c.e === nearest && c.p === 'CE') {
@@ -516,7 +507,7 @@ const AuthedApp = ({ user, logout }) => {
                 strikes[symbol] = [];
             }
         }
-        return { nearestExpiries: expiries, availableStrikes: strikes };
+        return strikes;
     }, []);
 
     // Snap `spot` to the closest value in `strikes` (sorted ascending).
@@ -545,137 +536,7 @@ const AuthedApp = ({ user, logout }) => {
     const niftyAtmStrike  = snapToClosestStrike(niftyLtp,  availableStrikes.NIFTY);
     const sensexAtmStrike = snapToClosestStrike(sensexLtp, availableStrikes.BSX);
 
-    // Resolve CE / PE tokens for the current ATM. Returns { tkn, strike }
-    // or null if we can't find a match.
-    const resolveOption = (indexSymbol, strike, ceOrPe) => {
-        if (strike == null) return null;
-        const expiry = nearestExpiries[indexSymbol];
-        if (!expiry) return null;
-        // Compare with a small epsilon tolerance so a contract stored as
-        // "23450.00000" matches an integer 23450 even if either side has
-        // trailing float noise from a previous operation.
-        const match = contractsData.find(
-            c => c.s === indexSymbol
-                && c.e === expiry
-                && c.p === ceOrPe
-                && Math.abs(Number(c.st) - strike) < 0.5
-        );
-        return match ? { tkn: match.t, strike } : null;
-    };
-
-    const niftyCe  = useMemo(() => resolveOption('NIFTY', niftyAtmStrike, 'CE'),
-        [niftyAtmStrike, nearestExpiries]);
-    const niftyPe  = useMemo(() => resolveOption('NIFTY', niftyAtmStrike, 'PE'),
-        [niftyAtmStrike, nearestExpiries]);
-    const sensexCe = useMemo(() => resolveOption('BSX',   sensexAtmStrike, 'CE'),
-        [sensexAtmStrike, nearestExpiries]);
-    const sensexPe = useMemo(() => resolveOption('BSX',   sensexAtmStrike, 'PE'),
-        [sensexAtmStrike, nearestExpiries]);
-
-    // Track LTPs for the 4 ATM tokens. Updated synchronously on every
-    // depth-packet, synced to React state once a second for rendering.
-    const atmLtpsRef = useRef({});                    // { tkn: ltp }
-    const [atmLtps, setAtmLtps] = useState({});
-    const atmSubscribedRef = useRef(new Set());       // tokens we've already subscribed to
-
-    // Subscribe to any newly-computed ATM tokens. Old ones from previous
-    // strikes remain subscribed in the background (harmless — we just ignore
-    // their packets). This keeps the logic simple and avoids an unsubscribe
-    // dance every time the spot crosses a strike boundary.
-    useEffect(() => {
-        if (typeof subscribe !== 'function') return;
-        const toSubscribe = [];
-        const maybeAdd = (opt, xchg, symLabel) => {
-            if (!opt?.tkn) return;
-            const key = `${xchg}:${opt.tkn}`;
-            if (atmSubscribedRef.current.has(key)) return;
-            atmSubscribedRef.current.add(key);
-            toSubscribe.push({ Xchg: xchg, Tkn: String(opt.tkn), Symbol: symLabel });
-        };
-        maybeAdd(niftyCe,  'NSEFO', `NIFTY ${niftyAtmStrike} CE`);
-        maybeAdd(niftyPe,  'NSEFO', `NIFTY ${niftyAtmStrike} PE`);
-        maybeAdd(sensexCe, 'BSEFO', `SENSEX ${sensexAtmStrike} CE`);
-        maybeAdd(sensexPe, 'BSEFO', `SENSEX ${sensexAtmStrike} PE`);
-        if (toSubscribe.length > 0) {
-            try {
-                subscribe(toSubscribe, 2); // FeedType 2 = Depth (for options)
-                console.log('[ATM] Subscribed:', toSubscribe.map(q => `${q.Xchg}:${q.Tkn} (${q.Symbol})`));
-            } catch (e) {
-                console.warn('[ATM] subscribe failed', e);
-            }
-        } else {
-            console.log('[ATM] Current tokens', {
-                niftyCe: niftyCe?.tkn, niftyPe: niftyPe?.tkn,
-                sensexCe: sensexCe?.tkn, sensexPe: sensexPe?.tkn,
-                niftyAtmStrike, sensexAtmStrike,
-            });
-        }
-    }, [niftyCe, niftyPe, sensexCe, sensexPe, subscribe, niftyAtmStrike, sensexAtmStrike]);
-
-    // ---------- Seed ATM options into demo state ----------
-    // The existing demo interval walks every entry in `demoStateRef`. So as
-    // soon as we inject the 4 currently-resolved ATM option tokens here, the
-    // next tick will random-walk them and dispatch synthetic depth-packets
-    // for each — which the ATM widget's listener picks up like any other
-    // packet. This makes the widget populate in demo mode without any
-    // special-casing downstream.
-    // ATM demo seeding disabled along with the rest of the dummy feature.
-    /*
-    useEffect(() => {
-        if (!demoMode) return;
-        // Plausible at-the-money weekly premiums — random-walked ±0.15% per
-        // second just like the stock LTPs. Rough approximation based on
-        // ATM * IV * sqrt(T/365) with IV≈15% and T≈7 days.
-        const seed = (opt, label, basePremium) => {
-            if (!opt?.tkn) return;
-            if (demoStateRef.current[opt.tkn]) return; // already seeded
-            // Random starting point within ±20% of the base so the 4 values
-            // aren't all identical on first frame.
-            const ltp = basePremium * (0.8 + Math.random() * 0.4);
-            demoStateRef.current[opt.tkn] = {
-                tkn: String(opt.tkn),
-                symbol: label,
-                ltp,
-                ttq: 0,
-                prevClose: basePremium, // lock so A/D-style math (if ever used) has a baseline
-            };
-            console.log(`[ATM demo seed] ${label} tkn=${opt.tkn} ltp≈${ltp.toFixed(2)}`);
-        };
-        seed(niftyCe,  `NIFTY ${niftyAtmStrike} CE`, 150);
-        seed(niftyPe,  `NIFTY ${niftyAtmStrike} PE`, 150);
-        seed(sensexCe, `SENSEX ${sensexAtmStrike} CE`, 500);
-        seed(sensexPe, `SENSEX ${sensexAtmStrike} PE`, 500);
-    }, [demoMode, niftyCe, niftyPe, sensexCe, sensexPe, niftyAtmStrike, sensexAtmStrike]);
-    */
-
-    // One packet listener for all 4 tokens. Updates the ref synchronously
-    // so the event handler isn't throttled in background tabs.
-    useEffect(() => {
-        const bus = depthEvents.current;
-        const handler = (e) => {
-            const packet = e.detail;
-            const tkn = packet?.Tkn;
-            if (!tkn) return;
-            const ltp = readLtp(packet);
-            if (ltp == null) return;
-            atmLtpsRef.current[String(tkn)] = ltp;
-        };
-        bus.addEventListener('depth-packet', handler);
-        return () => bus.removeEventListener('depth-packet', handler);
-    }, []);
-
-    // Sync ref → state at 1 Hz so the widget re-renders.
-    useEffect(() => {
-        const id = setInterval(() => {
-            setAtmLtps({ ...atmLtpsRef.current });
-        }, 1000);
-        return () => clearInterval(id);
-    }, []);
-
-    const niftyCeLtp  = niftyCe  ? atmLtps[String(niftyCe.tkn)]  : null;
-    const niftyPeLtp  = niftyPe  ? atmLtps[String(niftyPe.tkn)]  : null;
-    const sensexCeLtp = sensexCe ? atmLtps[String(sensexCe.tkn)] : null;
-    const sensexPeLtp = sensexPe ? atmLtps[String(sensexPe.tkn)] : null;
+    // CE/PE option tracking removed — ATM widget now shows strike only.
 
     // ---------- NIFTY 50 Advance / Decline ----------
     // Resolve every NIFTY 50 constituent's NSE token via stocksData. Subscribe
@@ -1122,48 +983,20 @@ const AuthedApp = ({ user, logout }) => {
                     the right. Shows NIFTY and SENSEX ATM CE/PE side-by-side,
                     updating live from the WS depth feed. */}
                 <div className="absolute left-1/2 -translate-x-1/2 pointer-events-none flex items-center gap-2">
-                    {/* NIFTY block */}
-                    <div className="pointer-events-auto flex items-center gap-1.5 bg-gradient-to-r from-cyan-500/[0.06] to-transparent border border-cyan-500/30 rounded h-7 pl-2 pr-1.5">
-                        <div className="flex items-center gap-1">
-                            <span className="text-[9px] font-black text-cyan-400/90 uppercase tracking-wider">Nifty ATM</span>
-                            <span className="text-[10px] font-black text-white/50 font-mono tabular-nums">
-                                {niftyAtmStrike != null ? Math.round(niftyAtmStrike).toString() : '—'}
-                            </span>
-                        </div>
-                        <div className="flex items-center gap-1 pl-1.5 border-l border-cyan-500/20">
-                            <span className="text-[8px] font-black text-emerald-400/80 uppercase">CE</span>
-                            <span className="text-[12px] font-black text-emerald-300 font-mono tabular-nums min-w-[48px] text-right">
-                                {niftyCeLtp != null ? Number(niftyCeLtp).toFixed(2) : '—'}
-                            </span>
-                        </div>
-                        <div className="flex items-center gap-1">
-                            <span className="text-[8px] font-black text-red-400/80 uppercase">PE</span>
-                            <span className="text-[12px] font-black text-red-300 font-mono tabular-nums min-w-[48px] text-right">
-                                {niftyPeLtp != null ? Number(niftyPeLtp).toFixed(2) : '—'}
-                            </span>
-                        </div>
+                    {/* NIFTY ATM */}
+                    <div className="pointer-events-auto flex items-center gap-1.5 bg-gradient-to-r from-cyan-500/[0.08] to-transparent border border-cyan-500/40 rounded h-7 px-2.5">
+                        <span className="text-[9px] font-black text-cyan-400/90 uppercase tracking-wider">Nifty ATM</span>
+                        <span className="text-[13px] font-black text-cyan-300 font-mono tabular-nums">
+                            {niftyAtmStrike != null ? Math.round(niftyAtmStrike).toLocaleString() : '—'}
+                        </span>
                     </div>
 
-                    {/* SENSEX block */}
-                    <div className="pointer-events-auto flex items-center gap-1.5 bg-gradient-to-r from-cyan-500/[0.06] to-transparent border border-cyan-500/30 rounded h-7 pl-2 pr-1.5">
-                        <div className="flex items-center gap-1">
-                            <span className="text-[9px] font-black text-cyan-400/90 uppercase tracking-wider">Sensex ATM</span>
-                            <span className="text-[10px] font-black text-white/50 font-mono tabular-nums">
-                                {sensexAtmStrike != null ? Math.round(sensexAtmStrike).toString() : '—'}
-                            </span>
-                        </div>
-                        <div className="flex items-center gap-1 pl-1.5 border-l border-cyan-500/20">
-                            <span className="text-[8px] font-black text-emerald-400/80 uppercase">CE</span>
-                            <span className="text-[12px] font-black text-emerald-300 font-mono tabular-nums min-w-[48px] text-right">
-                                {sensexCeLtp != null ? Number(sensexCeLtp).toFixed(2) : '—'}
-                            </span>
-                        </div>
-                        <div className="flex items-center gap-1">
-                            <span className="text-[8px] font-black text-red-400/80 uppercase">PE</span>
-                            <span className="text-[12px] font-black text-red-300 font-mono tabular-nums min-w-[48px] text-right">
-                                {sensexPeLtp != null ? Number(sensexPeLtp).toFixed(2) : '—'}
-                            </span>
-                        </div>
+                    {/* SENSEX ATM */}
+                    <div className="pointer-events-auto flex items-center gap-1.5 bg-gradient-to-r from-cyan-500/[0.08] to-transparent border border-cyan-500/40 rounded h-7 px-2.5">
+                        <span className="text-[9px] font-black text-cyan-400/90 uppercase tracking-wider">Sensex ATM</span>
+                        <span className="text-[13px] font-black text-cyan-300 font-mono tabular-nums">
+                            {sensexAtmStrike != null ? Math.round(sensexAtmStrike).toLocaleString() : '—'}
+                        </span>
                     </div>
                 </div>
 
