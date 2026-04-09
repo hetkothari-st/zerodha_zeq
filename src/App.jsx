@@ -42,16 +42,18 @@ const NIFTY_50 = [
 ];
 
 const BUCKET_OPTIONS = [
-    { value: 1,  label: '1m'  },
-    { value: 2,  label: '2m'  },
-    { value: 3,  label: '3m'  },
-    { value: 4,  label: '4m'  },
-    { value: 5,  label: '5m'  },
-    { value: 10, label: '10m' },
-    { value: 15, label: '15m' },
-    { value: 30, label: '30m' },
-    { value: 45, label: '45m' },
-    { value: 60, label: '60m' },
+    { value: 0.25, label: '15s' },
+    { value: 0.5,  label: '30s' },
+    { value: 1,    label: '1m'  },
+    { value: 2,    label: '2m'  },
+    { value: 3,    label: '3m'  },
+    { value: 4,    label: '4m'  },
+    { value: 5,    label: '5m'  },
+    { value: 10,   label: '10m' },
+    { value: 15,   label: '15m' },
+    { value: 30,   label: '30m' },
+    { value: 45,   label: '45m' },
+    { value: 60,   label: '60m' },
 ];
 
 const VOLUME_UNIT_OPTIONS = [

@@ -64,14 +64,28 @@ const readField = (packet, keys) => {
     return null;
 };
 
-// Round a timestamp DOWN to the start of its N-minute bucket and format as HH:MM.
-// e.g. ts=14:23, bucket=5 -> "14:20"; ts=14:27, bucket=5 -> "14:25".
+// Raw data granularity — every packet is bucketed at this resolution.
+// Display aggregates upward (30s, 1m, 5m, …) from this base.
+const RAW_BUCKET_MINUTES = 0.25; // 15 seconds
+
+// Round a timestamp DOWN to the start of its N-minute bucket.
+// For buckets >= 1 minute: format as HH:MM (e.g. 14:23, bucket=5 → "14:20").
+// For sub-minute buckets: format as HH:MM:SS (e.g. 14:23:37, bucket=0.25 → "14:23:30").
 const fmtBucket = (ts, bucketMinutes = 1) => {
     const d = new Date(ts);
     const hh = d.getHours().toString().padStart(2, '0');
-    const bucketed = Math.floor(d.getMinutes() / bucketMinutes) * bucketMinutes;
-    const mm = bucketed.toString().padStart(2, '0');
-    return `${hh}:${mm}`;
+    if (bucketMinutes >= 1) {
+        const bucketed = Math.floor(d.getMinutes() / bucketMinutes) * bucketMinutes;
+        const mm = bucketed.toString().padStart(2, '0');
+        return `${hh}:${mm}`;
+    }
+    // Sub-minute: bucket by seconds
+    const bucketSec = Math.round(bucketMinutes * 60);
+    const totalSec = d.getMinutes() * 60 + d.getSeconds();
+    const bucketed = Math.floor(totalSec / bucketSec) * bucketSec;
+    const mm = Math.floor(bucketed / 60).toString().padStart(2, '0');
+    const ss = (bucketed % 60).toString().padStart(2, '0');
+    return `${hh}:${mm}:${ss}`;
 };
 
 // Re-aggregate existing per-stock history into a new bucket size. Preserves
@@ -125,8 +139,8 @@ const reBucketHistories = (histories, newBucketMinutes) => {
         }
 
         aggregated.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-        // cap to the same 500-row ceiling the sampler uses
-        result[stockId] = aggregated.length > 500 ? aggregated.slice(-500) : aggregated;
+        // cap row count (1500 ≈ 6+ hours at 15s raw granularity)
+        result[stockId] = aggregated.length > 1500 ? aggregated.slice(-1500) : aggregated;
     }
     return result;
 };
@@ -1398,7 +1412,7 @@ const VerticalLayout = ({
     subscribe,
     extraStocks = [],          // [{ symbol }] from App.jsx dropdown
     onRemoveExtraStock,        // (symbol) => void
-    bucketSize = 1,            // minutes per bucket (1, 5, 10, 15, 30)
+    bucketSize = 1,            // minutes per bucket (0.25=15s, 0.5=30s, 1, 5, 10, 15, 30)
     volumeUnit = 'auto',       // 'auto' | 'K' | 'L' | 'Cr'
     wsStatus = 'connected',    // current WebSocket status from useMarketData
     depthEvents,               // EventTarget that fires 'depth-packet' for every WS data packet
@@ -1442,11 +1456,10 @@ const VerticalLayout = ({
             const parsed = JSON.parse(raw);
             // Discard if from a different day (TTQ resets each trading day).
             if (parsed?.day !== todayKey()) return null;
-            // The new model stores raw 1-minute data only. Old persisted blobs
+            // The current model stores raw 15-second data. Old persisted blobs
             // saved at a larger bucket size are aggregated and can't be split
-            // back into 1m points, so we drop them on load. Users will lose
-            // history once on the upgrade; new saves will always be raw 1m.
-            if (parsed?.bucketSize !== undefined && parsed.bucketSize !== 1) return null;
+            // back into 15s points, so we drop them on load.
+            if (parsed?.bucketSize !== undefined && parsed.bucketSize !== RAW_BUCKET_MINUTES) return null;
             return parsed;
         } catch {
             return null;
@@ -1532,7 +1545,7 @@ const VerticalLayout = ({
     // data is never mutated, so going 1m → 5m → 1m correctly returns to
     // the original detail.
     const displayedHistories = useMemo(() => {
-        if (bucketSize === 1) return histories;
+        if (bucketSize === RAW_BUCKET_MINUTES) return histories;
         return reBucketHistories(histories, bucketSize);
     }, [histories, bucketSize]);
 
@@ -1702,7 +1715,7 @@ const VerticalLayout = ({
     // Mirror bucketSize so the sampling interval picks up the new value
     // without being torn down.
     // Note: there used to be a bucketRef here that processPacket read to
-    // decide its bucketing. processPacket now ALWAYS uses 1-minute buckets
+    // decide its bucketing. processPacket now ALWAYS uses 15-second buckets
     // (raw source of truth) so the ref is no longer needed.
 
     // Mirror WS status so sampling can skip while disconnected.
@@ -1736,11 +1749,11 @@ const VerticalLayout = ({
     useEffect(() => {
         const flush = () => {
             try {
-                // Persisted data is always RAW 1m (the source of truth).
-                // The bucketSize tag is fixed at 1 so the loader knows.
+                // Persisted data is always RAW 15s (the source of truth).
+                // The bucketSize tag is fixed at RAW_BUCKET_MINUTES so the loader knows.
                 localStorage.setItem(STORAGE_KEY, JSON.stringify({
                     day: todayKey(),
-                    bucketSize: 1,
+                    bucketSize: RAW_BUCKET_MINUTES,
                     histories: histRef.current,
                     snapshots: snapRef.current,
                 }));
@@ -1813,11 +1826,11 @@ const VerticalLayout = ({
         if (vol === null && ltp === null) return;
 
         const now = packet._receivedAt || Date.now();
-        // ALWAYS bucket the source-of-truth at raw 1-minute granularity. The
+        // ALWAYS bucket the source-of-truth at raw 15-second granularity. The
         // displayed view aggregates this on demand via the displayedHistories
         // useMemo, so changing the timeframe is non-destructive — going
-        // 1m → 5m → 1m returns to the original detail.
-        const minuteKey = fmtBucket(now, 1);
+        // 15s → 1m → 5m → 15s returns to the original detail.
+        const minuteKey = fmtBucket(now, RAW_BUCKET_MINUTES);
 
         // ----- snapshots -----
         const curSnap = snapshotsRef.current[stock.id] || { ltp: null, vol: null };
@@ -1845,7 +1858,7 @@ const VerticalLayout = ({
             if (
                 last &&
                 vol > last.cumVol &&
-                (now - (last.timestamp || 0)) < 90000
+                (now - (last.timestamp || 0)) < Math.round(RAW_BUCKET_MINUTES * 60 * 1.5) * 1000
             ) {
                 const lastStartCum = last.startCum ?? last.cumVol - last.delta;
                 workingArr = [...arr.slice(0, -1), {
@@ -1866,7 +1879,7 @@ const VerticalLayout = ({
                 priceClose: ltp,
             };
             let newArr = [...workingArr, newRow];
-            if (newArr.length > 500) newArr = newArr.slice(-500);
+            if (newArr.length > 1500) newArr = newArr.slice(-1500);
             historiesRef.current = { ...historiesRef.current, [stock.id]: newArr };
             historiesDirtyRef.current = true;
         } else if (vol !== last.cumVol || (ltp !== null && ltp !== last.priceClose)) {
