@@ -1,16 +1,28 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 
 // WebSocket endpoint resolution:
-//   - In the browser on production (HTTPS), hit /ws on the same origin so the
-//     Node server on Railway can proxy to the broker over plain TCP. This
-//     avoids the mixed-content block browsers put on ws:// from an https:
-//     page.
-//   - In local Vite dev (http://localhost:5292), ALSO hit /ws — vite.config.js
-//     proxies it straight to the broker, so dev behaves identically to prod
-//     without needing the Node server running.
-//   - If something non-browser (SSR, tests) imports this, fall back to the
-//     direct broker URL.
+//   - If a build-time VITE_WS_URL is set, use it as-is. This is how production
+//     points the Railway-hosted SPA at an external proxy (e.g. a Cloudflare
+//     Tunnel terminating at a Node proxy on a machine inside India, since
+//     Railway's egress IP is geo-blocked by the broker). The value should be
+//     either a full ws/wss URL OR an https URL (in which case we swap https→
+//     wss and append /ws).
+//   - Otherwise hit /ws on the same origin. Works for local Vite dev (vite.
+//     config.js proxies /ws to the broker) and for any future deploy where
+//     the host CAN reach the broker directly.
+//   - Non-browser fallback: the direct broker URL.
 const resolveWsUrl = () => {
+    const envUrl = import.meta.env?.VITE_WS_URL;
+    if (envUrl) {
+        // Allow https://host or http://host shorthand → convert to wss/ws + /ws
+        if (/^https?:\/\//i.test(envUrl)) {
+            const u = new URL(envUrl);
+            const scheme = u.protocol === 'https:' ? 'wss:' : 'ws:';
+            const path = u.pathname && u.pathname !== '/' ? u.pathname : '/ws';
+            return `${scheme}//${u.host}${path}`;
+        }
+        return envUrl; // assume already a ws:// or wss:// URL
+    }
     if (typeof window !== 'undefined' && window.location) {
         const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         return `${scheme}//${window.location.host}/ws`;
