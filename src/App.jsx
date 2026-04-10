@@ -352,16 +352,26 @@ const AuthedApp = ({ user, logout }) => {
         if (marketOpen && marketClosedDismissed) setMarketClosedDismissed(false);
     }, [marketOpen, marketClosedDismissed]);
 
-    // ---------- Auto-disconnect on market close ----------
-    // When the market transitions into "closed" state (or if the app is
-    // loaded during non-trading hours), automatically force-disconnect the
-    // WebSocket so the system stops entirely. One-way coupling only —
-    // re-opening is still a manual action (user clicks Connect), so a user
-    // who intentionally reconnects mid-close to inspect data doesn't get
-    // hammered by this effect.
+    // ---------- Auto-disconnect on market close / auto-reconnect on open ----------
+    // Track the previous marketOpen value so we can detect transitions.
+    const prevMarketOpenRef = useRef(marketOpen);
     useEffect(() => {
-        if (!marketOpen) {
+        const wasOpen = prevMarketOpenRef.current;
+        prevMarketOpenRef.current = marketOpen;
+
+        if (!marketOpen && wasOpen) {
+            // Market just closed → disconnect and remember we were connected
             setIsWsEnabled(false);
+            try { localStorage.setItem('mt_ws_auto_reconnect', 'true'); } catch {}
+        } else if (marketOpen && !wasOpen) {
+            // Market just opened → auto-reconnect if we were connected before close
+            try {
+                const shouldReconnect = localStorage.getItem('mt_ws_auto_reconnect');
+                if (shouldReconnect === 'true') {
+                    setIsWsEnabled(true);
+                    localStorage.removeItem('mt_ws_auto_reconnect');
+                }
+            } catch {}
         }
     }, [marketOpen]);
 
