@@ -97,7 +97,8 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
 
                 // 1. Handle Login
                 if (Type === 'Login') {
-                    if (Data.Error === null) {
+                    console.log('[WS] Login response:', JSON.stringify(Data));
+                    if (!Data.Error) {
                         console.log('[WS] Login Success');
                         isLoggedIn.current = true;
                         isReady.current = true;
