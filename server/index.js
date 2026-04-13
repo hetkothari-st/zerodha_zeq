@@ -65,7 +65,11 @@ wss.on('connection', (client, req) => {
 
     upstream.on('message', (data) => {
         if (client.readyState === WebSocket.OPEN) {
-            client.send(data);
+            // The broker sends Buffer objects. Forward as a UTF-8 string so
+            // the browser receives a text frame (not binary/Blob), which lets
+            // the client JSON.parse(event.data) work directly.
+            const text = typeof data === 'string' ? data : data.toString('utf8');
+            client.send(text);
         }
     });
 
