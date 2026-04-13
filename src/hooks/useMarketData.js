@@ -67,6 +67,10 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
         wsCredentialRef.current = wsCredential;
     }, [onMessage, onDepthPacket, enabled, wsCredential]);
 
+    // Track message stats for diagnostics
+    const msgCountRef = useRef(0);
+    const msgTypesRef = useRef({});
+
     const connect = useCallback(() => {
         if (ws.current) {
             ws.current.onclose = null;
@@ -78,89 +82,103 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
         ws.current = new WebSocket(WS_URL);
 
         ws.current.onopen = () => {
-            console.log('[WS] Connected, authenticating...');
+            console.log('[WS] WebSocket OPEN — sending Login...');
             setStatus('connected');
-            // Build LoginId/Password from the caller-supplied credential.
-            // Both fields receive the same string, which is already guaranteed
-            // unique per session by buildWsCredential().
+            msgCountRef.current = 0;
+            msgTypesRef.current = {};
             const cred = wsCredentialRef.current || `anon_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-            ws.current.send(JSON.stringify({
-                Type: "Login",
-                Data: { LoginId: cred, Password: cred }
-            }));
+            const loginPayload = { Type: "Login", Data: { LoginId: cred, Password: cred } };
+            console.log('[WS] Login payload:', JSON.stringify(loginPayload));
+            ws.current.send(JSON.stringify(loginPayload));
         };
 
         ws.current.onmessage = (event) => {
             try {
+                // Log raw event.data type for first message (binary vs string diagnostic)
+                msgCountRef.current++;
+                if (msgCountRef.current === 1) {
+                    console.log('[WS] First message received — data type:', typeof event.data,
+                        event.data instanceof Blob ? '(Blob)' : '(string)',
+                        'length:', event.data.length || event.data.size);
+                }
+
                 const msg = JSON.parse(event.data);
                 const { Type, Data } = msg;
 
-                // 1. Handle Login
-                if (Type === 'Login') {
-                    console.log('[WS] Login response:', JSON.stringify(Data));
-                    if (!Data.Error) {
-                        console.log('[WS] Login Success');
-                        isLoggedIn.current = true;
-                        isReady.current = true;
+                // Track message type counts
+                msgTypesRef.current[Type] = (msgTypesRef.current[Type] || 0) + 1;
 
-                        // Unified Handshake (Restored + Pending)
-                        const activeQuotes = Array.from(activeSubscriptions.current.values());
-                        const freshQuotes = pendingSubs.current.flat().filter(q =>
-                            !activeSubscriptions.current.has(String(q.Tkn))
-                        );
+                // Log first 5 messages in detail, then summary every 100
+                if (msgCountRef.current <= 5) {
+                    console.log(`[WS] msg #${msgCountRef.current} type=${Type}`, Type === 'Login' ? JSON.stringify(Data) : '');
+                } else if (msgCountRef.current % 100 === 0) {
+                    console.log(`[WS] msg #${msgCountRef.current} — totals:`, JSON.stringify(msgTypesRef.current));
+                }
 
-                        // 1. Separate tokens by Exchange
-                        // NSEFO / BSEFO -> FeedType 2 (Depth) — options on both exchanges
-                        // NSE / BSE / NSECM / BSECM -> FeedType 1 (Touchline / MarketData)
-                        const allTokens = [...activeQuotes, ...freshQuotes];
-                        const depthTokens = allTokens.filter(
-                            q => q.Xchg === 'NSEFO' || q.Xchg === 'BSEFO'
-                        );
-
-                        const indexTokens = [
-                            { Tkn: '26000', Xchg: 'NSE' },
-                            { Tkn: '26009', Xchg: 'NSE' },
-                            { Tkn: '1', Xchg: 'BSE' }, // SENSEX Spot Token
-                            ...allTokens.filter(q => ['NSE', 'BSE', 'NSECM', 'BSECM'].includes(q.Xchg))
-                        ].filter((v, i, a) => a.findIndex(t => t.Tkn === v.Tkn && t.Xchg === v.Xchg) === i); // Deduplicate
-
-                        // Send Depth Sub
-                        if (depthTokens.length > 0) {
-                            ws.current.send(JSON.stringify({
-                                Type: "TokenRequest",
-                                Data: { SubType: true, FeedType: 2, quotes: depthTokens }
-                            }));
-                            console.log('[WS] Subscribed to Depth (FT2):', depthTokens.length);
-                            depthTokens.forEach(q => activeSubscriptions.current.set(String(q.Tkn), q));
-                        }
-
-                        // Send Index/Touchline Sub
-                        if (indexTokens.length > 0) {
-                            ws.current.send(JSON.stringify({
-                                Type: "TokenRequest",
-                                Data: { SubType: true, FeedType: 1, quotes: indexTokens }
-                            }));
-                            console.log('[WS] Subscribed to Index/Touchline (FT1):', indexTokens.map(t => t.Tkn));
-                            indexTokens.forEach(q => activeSubscriptions.current.set(String(q.Tkn), q));
-                        }
-
-                        pendingSubs.current = [];
-
-                        if (hbInterval.current) clearInterval(hbInterval.current);
-                        hbInterval.current = setInterval(() => {
-                            if (ws.current?.readyState === WebSocket.OPEN) {
-                                ws.current.send(JSON.stringify({
-                                    Type: "Info",
-                                    Data: {
-                                        InfoType: "HB",
-                                        InfoMsg: "Heartbeat"
-                                    }
-                                }));
-                            }
-                        }, 3000); // 3s Heartbeat
-                    } else {
-                        console.error('[WS] Login Failed:', Data.Error);
+                // ---------- Activate session on first usable message ----------
+                if (!isReady.current) {
+                    if (Type === 'Login' && Data?.Error) {
+                        console.error('[WS] LOGIN FAILED:', Data.Error);
+                        return;
                     }
+                    console.log('[WS] ✓ Session ACTIVE (triggered by msg type:', Type + ')');
+                    isLoggedIn.current = true;
+                    isReady.current = true;
+
+                    const activeQuotes = Array.from(activeSubscriptions.current.values());
+                    const freshQuotes = pendingSubs.current.flat().filter(q =>
+                        !activeSubscriptions.current.has(String(q.Tkn))
+                    );
+                    console.log('[WS] Pending subscriptions:', freshQuotes.length, '| Active (restore):', activeQuotes.length);
+
+                    const allTokens = [...activeQuotes, ...freshQuotes];
+                    const depthTokens = allTokens.filter(
+                        q => q.Xchg === 'NSEFO' || q.Xchg === 'BSEFO'
+                    );
+
+                    const indexTokens = [
+                        { Tkn: '26000', Xchg: 'NSE' },
+                        { Tkn: '26009', Xchg: 'NSE' },
+                        { Tkn: '1', Xchg: 'BSE' },
+                        ...allTokens.filter(q => ['NSE', 'BSE', 'NSECM', 'BSECM'].includes(q.Xchg))
+                    ].filter((v, i, a) => a.findIndex(t => t.Tkn === v.Tkn && t.Xchg === v.Xchg) === i);
+
+                    if (depthTokens.length > 0) {
+                        const payload = { Type: "TokenRequest", Data: { SubType: true, FeedType: 2, quotes: depthTokens } };
+                        ws.current.send(JSON.stringify(payload));
+                        console.log('[WS] → Sent Depth sub (FT2):', depthTokens.length, 'tokens');
+                        depthTokens.forEach(q => activeSubscriptions.current.set(String(q.Tkn), q));
+                    } else {
+                        console.log('[WS] No depth tokens to subscribe');
+                    }
+
+                    if (indexTokens.length > 0) {
+                        const payload = { Type: "TokenRequest", Data: { SubType: true, FeedType: 1, quotes: indexTokens } };
+                        ws.current.send(JSON.stringify(payload));
+                        console.log('[WS] → Sent Index/Touchline sub (FT1):', indexTokens.length, 'tokens:', indexTokens.map(t => t.Tkn));
+                        indexTokens.forEach(q => activeSubscriptions.current.set(String(q.Tkn), q));
+                    } else {
+                        console.log('[WS] No index tokens to subscribe');
+                    }
+
+                    console.log('[WS] Total active subscriptions:', activeSubscriptions.current.size);
+                    pendingSubs.current = [];
+
+                    if (hbInterval.current) clearInterval(hbInterval.current);
+                    hbInterval.current = setInterval(() => {
+                        if (ws.current?.readyState === WebSocket.OPEN) {
+                            ws.current.send(JSON.stringify({
+                                Type: "Info",
+                                Data: { InfoType: "HB", InfoMsg: "Heartbeat" }
+                            }));
+                        }
+                    }, 3000);
+
+                    if (Type === 'Login') return;
+                }
+
+                if (Type === 'Login') {
+                    console.log('[WS] Late Login response:', JSON.stringify(Data));
                     return;
                 }
 
@@ -227,12 +245,12 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
                 if (onMessageRef.current) onMessageRef.current(Type, Data);
 
             } catch (err) {
-                console.error('WS Message Error:', err);
+                console.error('[WS] Message parse/handle error:', err, '| raw data type:', typeof event.data, '| first 200 chars:', String(event.data).substring(0, 200));
             }
         };
 
         ws.current.onclose = (event) => {
-            console.warn(`[WS] Closed: ${event.code} - ${event.reason || 'Abnormal Closure'}`);
+            console.warn(`[WS] CLOSED code=${event.code} reason="${event.reason || 'Abnormal Closure'}" | wasReady=${isReady.current} | msgs received=${msgCountRef.current} | types=${JSON.stringify(msgTypesRef.current)}`);
             setStatus('disconnected');
             isLoggedIn.current = false;
             isReady.current = false;
@@ -242,13 +260,17 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
             if (handshakeTimeout.current) clearTimeout(handshakeTimeout.current);
 
             if (enabledRef.current) {
-                // Modifying aggressive reconnect to prevent 1006 loops/bans
-                console.warn('[WS] Reconnecting (2000ms)...');
+                console.warn('[WS] Will reconnect in 2000ms...');
                 reconnectTimeout.current = setTimeout(connect, 2000);
+            } else {
+                console.log('[WS] Not reconnecting (disabled)');
             }
         };
 
-        ws.current.onerror = () => setStatus('error');
+        ws.current.onerror = (err) => {
+            console.error('[WS] ERROR event — readyState:', ws.current?.readyState, '| isReady:', isReady.current);
+            setStatus('error');
+        };
 
     }, []); // Only create connect once
 
