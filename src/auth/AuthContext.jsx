@@ -1,26 +1,25 @@
-// Minimal client-side auth gate.
+// Minimal client-side auth gate backed by server-side Supabase validation.
 //
-// Stores a {email, name, picture, provider} object in localStorage once the
-// user has either (a) signed in via Google or (b) typed the hardcoded
-// Admin / Admin123 credentials. The rest of the app reads `useAuth()` to
-// check whether the user is allowed through the login wall and to derive a
-// stable loginId string for the WebSocket credential.
+// Login flow:
+//   1. User enters username + password on LoginPage
+//   2. Frontend POSTs to /api/login on the server
+//   3. Server validates against Supabase `app_users` table
+//   4. Server checks no other active session exists for that user
+//   5. Server returns {ok, user, sessionToken} or {ok:false, error}
+//   6. Frontend stores user + sessionToken in localStorage
 //
-// Note on security: this is a gate, not a fortress. The Google ID token is
-// decoded client-side without verifying its signature — that's fine for a
-// "prove which email you own so we can show/hide the UI" check, but do NOT
-// treat this as authorization for any sensitive backend call.
+// Logout:
+//   1. Frontend POSTs to /api/logout with the sessionToken
+//   2. Server clears the active session
+//   3. Frontend clears localStorage
 
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { setUserNamespace } from './userStorage';
 
 const STORAGE_KEY = 'funnel_eq_auth_user';
+const SESSION_KEY = 'funnel_eq_session_token';
 
-// Activate the per-user namespace immediately on module load — BEFORE any
-// component mounts and reads localStorage. This covers the page-reload case:
-// if a user is already persisted in localStorage, we set the namespace right
-// now so that all subsequent mt_/vl_/nifty_baseline reads land in that user's
-// bucket from the very first render.
+// Activate per-user namespace on module load (covers page reload)
 try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
@@ -41,6 +40,14 @@ export function AuthProvider({ children }) {
         }
     });
 
+    const [sessionToken, setSessionToken] = useState(() => {
+        try {
+            return localStorage.getItem(SESSION_KEY) || null;
+        } catch {
+            return null;
+        }
+    });
+
     useEffect(() => {
         try {
             if (user) localStorage.setItem(STORAGE_KEY, JSON.stringify(user));
@@ -48,24 +55,40 @@ export function AuthProvider({ children }) {
         } catch {}
     }, [user]);
 
-    // Flip the storage namespace SYNCHRONOUSLY (before React re-renders) so
-    // the new user's first render already reads from their own bucket.
-    const login = useCallback((u) => {
+    useEffect(() => {
+        try {
+            if (sessionToken) localStorage.setItem(SESSION_KEY, sessionToken);
+            else localStorage.removeItem(SESSION_KEY);
+        } catch {}
+    }, [sessionToken]);
+
+    const login = useCallback((u, token) => {
         if (u?.email) setUserNamespace(u.email);
         setUser(u);
+        setSessionToken(token || null);
     }, []);
 
-    // On logout we clear the namespace pointer. We do NOT wipe the logged-out
-    // user's namespaced keys — they belong to that user and should be there
-    // the next time they log back in. The shim + namespace switch is what
-    // gives each user their own persistent, private session.
-    const logout = useCallback(() => {
+    const logout = useCallback(async () => {
+        // Tell server to release the session
+        const token = sessionToken || localStorage.getItem(SESSION_KEY);
+        if (token) {
+            try {
+                await fetch('/api/logout', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sessionToken: token }),
+                });
+            } catch (e) {
+                console.warn('[auth] logout request failed:', e.message);
+            }
+        }
         setUserNamespace(null);
         setUser(null);
-    }, []);
+        setSessionToken(null);
+    }, [sessionToken]);
 
     return (
-        <AuthContext.Provider value={{ user, login, logout }}>
+        <AuthContext.Provider value={{ user, sessionToken, login, logout }}>
             {children}
         </AuthContext.Provider>
     );
@@ -77,17 +100,17 @@ export function useAuth() {
     return ctx;
 }
 
-// Build a unique, text-safe WS credential from the authenticated user.
-// Broker accepts any string for both LoginId and Password, and demands
-// uniqueness across concurrent sessions — so we anchor on the user's
-// identity and append a timestamp + random suffix every time this is
-// called. The same string is used for both LoginId and Password, per
-// the requirement.
+// WS credential — uses the Supabase username + a fixed 4-char suffix so each
+// user has a stable, unique broker identity across all sessions. The suffix is
+// derived from the username itself (not random), so it's the same every time.
 export function buildWsCredential(user) {
     if (!user) return null;
-    const raw = (user.email && user.email.split('@')[0]) || user.name || 'user';
-    const base = String(raw).replace(/[^a-zA-Z0-9]/g, '').slice(0, 20) || 'user';
-    const ts = Date.now().toString(36);
-    const rnd = Math.random().toString(36).slice(2, 8);
-    return `${base}_${ts}_${rnd}`;
+    const name = user.name || (user.email && user.email.split('@')[0]) || 'user';
+    // Generate a fixed 4-char suffix from the username
+    let hash = 0;
+    for (let i = 0; i < name.length; i++) {
+        hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
+    }
+    const suffix = Math.abs(hash).toString(36).slice(0, 4).padEnd(4, '0');
+    return `${name}_${suffix}`;
 }
