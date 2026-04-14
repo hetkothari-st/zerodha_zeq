@@ -92,7 +92,7 @@ export default function LoginPage() {
                                 placeholder="Username"
                                 autoComplete="username"
                                 disabled={loading}
-                                className="bg-transparent border-none flex-1 text-[13px] text-white placeholder-white/20 focus:outline-none disabled:opacity-50"
+                                className="bg-transparent border-none flex-1 text-[13px] text-white placeholder-white/20 focus:outline-none disabled:opacity-50 selection:bg-white/20 selection:text-white"
                             />
                         </div>
                         <div className="flex items-center gap-2 bg-white/[0.04] border border-white/10 rounded px-3 h-10 focus-within:border-emerald-500/40 transition-colors">
@@ -104,7 +104,7 @@ export default function LoginPage() {
                                 placeholder="Password"
                                 autoComplete="current-password"
                                 disabled={loading}
-                                className="bg-transparent border-none flex-1 text-[13px] text-white placeholder-white/20 focus:outline-none disabled:opacity-50"
+                                className="bg-transparent border-none flex-1 text-[13px] text-white placeholder-white/20 focus:outline-none disabled:opacity-50 selection:bg-white/20 selection:text-white"
                             />
                         </div>
 
