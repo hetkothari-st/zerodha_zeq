@@ -219,7 +219,7 @@ wss.on('connection', (client, req) => {
 
     const safeClose = (code, reason) => {
         try { client.close(code, reason); } catch {}
-        try { upstream.close(code, reason); } catch {}
+        try { upstream.terminate(); } catch {}
     };
 
     upstream.on('open', () => {
@@ -253,8 +253,6 @@ wss.on('connection', (client, req) => {
 
         if (client.readyState === WebSocket.OPEN) {
             client.send(text);
-        } else {
-            console.warn(`[ws-proxy #${id}] client not open (state=${client.readyState}), dropping upstream msg`);
         }
     });
 
