@@ -1663,6 +1663,24 @@ const VerticalLayout = ({
         const onWheel = (e) => {
             // If a child (e.g. the chart) has already handled it, skip
             if (e.defaultPrevented) return;
+
+            // Check if the event target is inside a vertically-scrollable child
+            // (e.g. TOTALS / NET VOL row containers). If so, let native vertical
+            // scroll handle it instead of converting to horizontal.
+            if (e.deltaY !== 0) {
+                let node = e.target;
+                while (node && node !== el) {
+                    const { overflowY } = getComputedStyle(node);
+                    if (overflowY === 'auto' || overflowY === 'scroll') {
+                        const canScrollDown = e.deltaY > 0 && node.scrollTop + node.clientHeight < node.scrollHeight;
+                        const canScrollUp = e.deltaY < 0 && node.scrollTop > 0;
+                        if (canScrollDown || canScrollUp) return; // let it scroll vertically
+                        break;
+                    }
+                    node = node.parentElement;
+                }
+            }
+
             // Convert vertical wheel into horizontal scroll
             if (e.deltaY !== 0 || e.deltaX !== 0) {
                 e.preventDefault();
