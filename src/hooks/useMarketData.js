@@ -90,6 +90,17 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
             const loginPayload = { Type: "Login", Data: { LoginId: cred, Password: cred } };
             console.log('[WS] Login payload:', JSON.stringify(loginPayload));
             ws.current.send(JSON.stringify(loginPayload));
+
+            // Start heartbeat immediately so the broker doesn't idle-timeout
+            if (hbInterval.current) clearInterval(hbInterval.current);
+            hbInterval.current = setInterval(() => {
+                if (ws.current?.readyState === WebSocket.OPEN) {
+                    ws.current.send(JSON.stringify({
+                        Type: "Info",
+                        Data: { InfoType: "HB", InfoMsg: "Heartbeat" }
+                    }));
+                }
+            }, 3000);
         };
 
         ws.current.onmessage = (event) => {
@@ -163,16 +174,6 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
 
                     console.log('[WS] Total active subscriptions:', activeSubscriptions.current.size);
                     pendingSubs.current = [];
-
-                    if (hbInterval.current) clearInterval(hbInterval.current);
-                    hbInterval.current = setInterval(() => {
-                        if (ws.current?.readyState === WebSocket.OPEN) {
-                            ws.current.send(JSON.stringify({
-                                Type: "Info",
-                                Data: { InfoType: "HB", InfoMsg: "Heartbeat" }
-                            }));
-                        }
-                    }, 3000);
 
                     if (Type === 'Login') return;
                 }
@@ -270,6 +271,9 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
         ws.current.onerror = (err) => {
             console.error('[WS] ERROR event — readyState:', ws.current?.readyState, '| isReady:', isReady.current);
             setStatus('error');
+            // Force-close so onclose fires and triggers reconnection.
+            // Without this, the connection can get stuck in 'error' state forever.
+            try { ws.current?.close(); } catch {}
         };
 
     }, []); // Only create connect once
