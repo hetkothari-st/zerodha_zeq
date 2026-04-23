@@ -1,391 +1,433 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { ZERODHA_CONFIG } from '../config/zerodha';
+import instrumentMap from '../instrument_map.json';
 
-// WebSocket endpoint resolution:
-//   - If a build-time VITE_WS_URL is set, use it as-is. This is how production
-//     points the Railway-hosted SPA at an external proxy (e.g. a Cloudflare
-//     Tunnel terminating at a Node proxy on a machine inside India, since
-//     Railway's egress IP is geo-blocked by the broker). The value should be
-//     either a full ws/wss URL OR an https URL (in which case we swap https→
-//     wss and append /ws).
-//   - Otherwise hit /ws on the same origin. Works for local Vite dev (vite.
-//     config.js proxies /ws to the broker) and for any future deploy where
-//     the host CAN reach the broker directly.
-//   - Non-browser fallback: the direct broker URL.
-const resolveWsUrl = () => {
-    const envUrl = import.meta.env?.VITE_WS_URL;
-    if (envUrl) {
-        // Allow https://host or http://host shorthand → convert to wss/ws + /ws
-        if (/^https?:\/\//i.test(envUrl)) {
-            const u = new URL(envUrl);
-            const scheme = u.protocol === 'https:' ? 'wss:' : 'ws:';
-            const path = u.pathname && u.pathname !== '/' ? u.pathname : '/ws';
-            return `${scheme}//${u.host}${path}`;
+// ─────────────────────────────────────────────────────────────────────
+// Zerodha KiteTicker WebSocket — Binary Market Data
+// ─────────────────────────────────────────────────────────────────────
+// Drop-in replacement for the old JSON-based broker hook.
+// Same external API: useMarketData(enabled, onMessage, onDepthPacket)
+// Same return shape: { status, depthData, subscribe }
+// ─────────────────────────────────────────────────────────────────────
+
+// ── Binary Parsing ────────────────────────────────────────────────────
+
+function parseTickPacket(buffer) {
+    const view = new DataView(buffer);
+    const len = buffer.byteLength;
+    const instrumentToken = view.getInt32(0);
+    const divisor = 100; // all prices in paise
+
+    // Index packet (28 or 32 bytes)
+    if (len === 28 || len === 32) {
+        const indexName = ZERODHA_CONFIG.INDEX_TOKENS[instrumentToken];
+        let appToken = String(instrumentToken);
+        if (indexName) {
+            for (const [oldTkn, name] of Object.entries(ZERODHA_CONFIG.OLD_INDEX_MAP)) {
+                if (name === indexName) { appToken = oldTkn; break; }
+            }
         }
-        return envUrl; // assume already a ws:// or wss:// URL
+        return {
+            Tkn: appToken,
+            Token: appToken,
+            Price: view.getInt32(4) / divisor,
+            ltp: view.getInt32(4) / divisor,
+            LastTradedPrice: view.getInt32(4) / divisor,
+            High: view.getInt32(8) / divisor,
+            Low: view.getInt32(12) / divisor,
+            Open: view.getInt32(16) / divisor,
+            Close: view.getInt32(20) / divisor,
+            Change: view.getInt32(24) / divisor,
+            _instrumentToken: instrumentToken,
+            _type: 'IndexData',
+            _receivedAt: Date.now(),
+        };
     }
-    if (typeof window !== 'undefined' && window.location) {
-        const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        return `${scheme}//${window.location.host}/ws`;
+
+    // LTP packet (8 bytes)
+    if (len === 8) {
+        return {
+            Tkn: String(instrumentToken),
+            Token: String(instrumentToken),
+            ltp: view.getInt32(4) / divisor,
+            _instrumentToken: instrumentToken,
+            _type: 'LTP',
+            _receivedAt: Date.now(),
+        };
     }
-    return 'ws://115.242.15.134:19101';
-};
 
-const WS_URL = resolveWsUrl();
+    // Quote (44 bytes) or Full/Depth (184 bytes)
+    const packet = {
+        Tkn: String(instrumentToken),
+        Token: String(instrumentToken),
+        ltp: view.getInt32(4) / divisor,
+        LTP: view.getInt32(4) / divisor,
+        LastTradedPrice: view.getInt32(4) / divisor,
+        LastTradedQty: view.getInt32(8),
+        ATP: view.getInt32(12) / divisor,
+        Volume: view.getInt32(16),
+        TTQ: view.getInt32(16),    // alias — VerticalLayout reads TTQ
+        TotalTradedQty: view.getInt32(16),
+        TotalBuyQ: view.getInt32(20),
+        TotalSellQ: view.getInt32(24),
+        Open: view.getInt32(28) / divisor,
+        O: view.getInt32(28) / divisor,
+        High: view.getInt32(32) / divisor,
+        H: view.getInt32(32) / divisor,
+        Low: view.getInt32(36) / divisor,
+        L: view.getInt32(36) / divisor,
+        Close: view.getInt32(40) / divisor,  // previous day's close (like old `C` field)
+        C: view.getInt32(40) / divisor,
+        _instrumentToken: instrumentToken,
+        _type: len === 184 ? 'Depth' : 'Quote',
+        _receivedAt: Date.now(),
+    };
 
-// Credentials are now passed in per hook invocation. Each call site builds
-// a fresh unique string via buildWsCredential(user) (see src/auth/AuthContext)
-// and hands it to us. The same value goes into both LoginId and Password,
-// per the broker's "any text, must be unique per session" contract.
-export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = null, wsCredential = null) => {
+    // Full mode: 5-level market depth (bytes 64-183)
+    if (len === 184) {
+        packet.LastTradeTime = view.getInt32(44);
+        packet.OI = view.getInt32(48);
+        packet.OIDayHigh = view.getInt32(52);
+        packet.OIDayLow = view.getInt32(56);
+        packet.ExchangeTimestamp = view.getInt32(60);
+
+        const depths = [];
+        const depthOffset = 64;
+        // 5 bid entries then 5 ask entries, each 12 bytes
+        for (let i = 0; i < 5; i++) {
+            const bidBase = depthOffset + (i * 12);
+            const askBase = depthOffset + 60 + (i * 12);
+            depths.push({
+                BP: view.getInt32(bidBase + 4) / divisor,
+                BQ: view.getInt32(bidBase),
+                BO: view.getInt16(bidBase + 8),
+                SP: view.getInt32(askBase + 4) / divisor,
+                SQ: view.getInt32(askBase),
+                SO: view.getInt16(askBase + 8),
+            });
+        }
+        packet.depths = depths;
+    }
+
+    return packet;
+}
+
+function parseBinaryMessage(arrayBuffer) {
+    const view = new DataView(arrayBuffer);
+    const packets = [];
+    if (arrayBuffer.byteLength < 2) return packets;
+
+    const numPackets = view.getInt16(0);
+    let offset = 2;
+
+    for (let i = 0; i < numPackets; i++) {
+        if (offset + 2 > arrayBuffer.byteLength) break;
+        const packetLen = view.getInt16(offset);
+        offset += 2;
+        if (offset + packetLen > arrayBuffer.byteLength) break;
+        const parsed = parseTickPacket(arrayBuffer.slice(offset, offset + packetLen));
+        if (parsed) packets.push(parsed);
+        offset += packetLen;
+    }
+
+    return packets;
+}
+
+// ── Token Mapping ─────────────────────────────────────────────────────
+
+function exchangeTokenToInstrumentToken(exchangeToken, exchange = 'NFO') {
+    const code = ZERODHA_CONFIG.EXCHANGE_CODES[exchange] ?? 2;
+    return parseInt(exchangeToken) * 256 + code;
+}
+
+// ── Hook ──────────────────────────────────────────────────────────────
+
+// Signature kept identical to old hook (4th wsCredential param is unused)
+export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = null, _wsCredential = null) => {
     const [status, setStatus] = useState('disconnected');
     const [depthData, setDepthData] = useState({});
 
     const ws = useRef(null);
-    const hbInterval = useRef(null);
     const reconnectTimeout = useRef(null);
-    const syncInterval = useRef(null);
-    const handshakeTimeout = useRef(null);
     const onMessageRef = useRef(onMessage);
     const onDepthPacketRef = useRef(onDepthPacket);
     const enabledRef = useRef(enabled);
-    const wsCredentialRef = useRef(wsCredential);
-    const isLoggedIn = useRef(false);
     const isReady = useRef(false);
     const pendingSubs = useRef([]);
 
-    // Data Buffers to prevent "React Storms"
+    // instrument_token → exchange_token (string)
+    const tokenMap = useRef(new Map());
+    // exchange_token → instrument_token
+    const reverseTokenMap = useRef(new Map());
+
+    const activeSubscriptions = useRef(new Map()); // exchangeToken → quote obj
+    const lastPacketTimes = useRef(new Map());
+
+    // For depthData state sync (50ms batching to avoid React storms)
     const depthBuffer = useRef({});
-    const lastUpdate = useRef(0);
+
     const packetRates = useRef({});
     const lastTelemetry = useRef(Date.now());
 
-    // Keep refs updated
     useEffect(() => {
         onMessageRef.current = onMessage;
         onDepthPacketRef.current = onDepthPacket;
         enabledRef.current = enabled;
-        wsCredentialRef.current = wsCredential;
-    }, [onMessage, onDepthPacket, enabled, wsCredential]);
+    }, [onMessage, onDepthPacket, enabled]);
 
-    // Track message stats for diagnostics
-    const msgCountRef = useRef(0);
-    const msgTypesRef = useRef({});
+    // ── Offline Instrument Map ────────────────────────────────────────
+    const instrumentMapLoaded = useRef(false);
 
+    const loadInstrumentMap = useCallback(() => {
+        if (instrumentMapLoaded.current) return;
+        let count = 0;
+        for (const [exchToken, instToken] of Object.entries(instrumentMap)) {
+            reverseTokenMap.current.set(exchToken, instToken);
+            tokenMap.current.set(instToken, exchToken);
+            count++;
+        }
+        console.log(`[KiteWS] Loaded ${count} instrument mappings`);
+        instrumentMapLoaded.current = true;
+    }, []);
+
+    // ── Resolve exchange_token → Zerodha instrument_token ─────────────
+    const resolveInstrumentToken = useCallback((exchangeToken, exchange = 'NFO') => {
+        // NFO/BFO: check offline map first (most reliable)
+        const fromMap = reverseTokenMap.current.get(String(exchangeToken));
+        if (fromMap) return fromMap;
+
+        // Index tokens (NIFTY, BANKNIFTY, SENSEX)
+        const indexName = ZERODHA_CONFIG.OLD_INDEX_MAP[String(exchangeToken)];
+        if (indexName) return ZERODHA_CONFIG.INDEX_TOKEN_BY_NAME[indexName];
+
+        // Fallback: formula (verified for NSE, NFO, BSE, BFO)
+        return exchangeTokenToInstrumentToken(exchangeToken, exchange);
+    }, []);
+
+    // ── Resolve Zerodha instrument_token → app exchange_token ──────────
+    const resolveAppToken = useCallback((instrumentToken) => {
+        // Index tokens
+        const indexName = ZERODHA_CONFIG.INDEX_TOKENS[instrumentToken];
+        if (indexName) {
+            for (const [oldTkn, name] of Object.entries(ZERODHA_CONFIG.OLD_INDEX_MAP)) {
+                if (name === indexName) return oldTkn;
+            }
+        }
+
+        // NFO/BFO instrument map
+        const fromMap = tokenMap.current.get(instrumentToken);
+        if (fromMap) return fromMap;
+
+        // Fallback: floor division (works for all exchanges since
+        // instrument_token = exchange_token * 256 + code, so floor(t/256) = exchange_token)
+        return String(Math.floor(instrumentToken / 256));
+    }, []);
+
+    // ── Connect ───────────────────────────────────────────────────────
     const connect = useCallback(() => {
-        // Always reset session flags so the NEW socket is guaranteed to go
-        // through activation (send TokenRequest on first msg). Without this,
-        // if the old socket's onclose never fires (see below), isReady stays
-        // true and the new connection silently skips resubscribing — so only
-        // broadcast IndexData flows and stock MarketData never arrives.
-        isReady.current = false;
-        isLoggedIn.current = false;
+        // If VITE_WS_HUB_URL is set, connect to the local hub instead of Zerodha directly.
+        // The hub holds the single Zerodha connection and relays ticks to all apps.
+        const hubUrl = import.meta.env.VITE_WS_HUB_URL || null;
+
+        if (!hubUrl) {
+            const { API_KEY, ACCESS_TOKEN } = ZERODHA_CONFIG;
+            if (!API_KEY || !ACCESS_TOKEN) {
+                console.error('[KiteWS] Missing API_KEY or ACCESS_TOKEN and no VITE_WS_HUB_URL set');
+                setStatus('error');
+                return;
+            }
+        }
 
         if (ws.current) {
             ws.current.onclose = null;
             ws.current.close();
         }
 
-        console.log('[WS] Connecting to:', WS_URL);
+        loadInstrumentMap();
+
+        const { API_KEY, ACCESS_TOKEN, WS_URL } = ZERODHA_CONFIG;
+        const url = hubUrl || `${WS_URL}?api_key=${API_KEY}&access_token=${ACCESS_TOKEN}`;
+        console.log('[KiteWS] Connecting...');
         setStatus('connecting');
-        ws.current = new WebSocket(WS_URL);
+
+        ws.current = new WebSocket(url);
+        ws.current.binaryType = 'arraybuffer';
 
         ws.current.onopen = () => {
-            console.log('[WS] WebSocket OPEN — sending Login...');
+            console.log('[KiteWS] Connected');
             setStatus('connected');
-            msgCountRef.current = 0;
-            msgTypesRef.current = {};
-            const cred = wsCredentialRef.current || `anon_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-            const loginPayload = { Type: "Login", Data: { LoginId: cred, Password: cred } };
-            console.log('[WS] Login payload:', JSON.stringify(loginPayload));
-            ws.current.send(JSON.stringify(loginPayload));
+            isReady.current = true;
 
-            // Start heartbeat immediately so the broker doesn't idle-timeout
-            if (hbInterval.current) clearInterval(hbInterval.current);
-            hbInterval.current = setInterval(() => {
-                if (ws.current?.readyState === WebSocket.OPEN) {
-                    ws.current.send(JSON.stringify({
-                        Type: "Info",
-                        Data: { InfoType: "HB", InfoMsg: "Heartbeat" }
-                    }));
-                }
-            }, 3000);
+            const allTokens = [
+                ...Array.from(activeSubscriptions.current.values()),
+                ...pendingSubs.current.flat(),
+            ];
+
+            const indexTokens = [256265, 260105, 265]; // NIFTY, BANKNIFTY, SENSEX
+
+            if (allTokens.length > 0) {
+                const instrumentTokens = allTokens.map(q => {
+                    return resolveInstrumentToken(q.Tkn, q.Xchg || 'NFO');
+                }).filter(Boolean);
+
+                const all = [...new Set([...instrumentTokens, ...indexTokens])];
+                ws.current.send(JSON.stringify({ a: 'subscribe', v: all }));
+                ws.current.send(JSON.stringify({ a: 'mode', v: ['full', all] }));
+                console.log(`[KiteWS] Subscribed ${all.length} tokens in full mode`);
+                allTokens.forEach(q => activeSubscriptions.current.set(String(q.Tkn), q));
+            } else {
+                ws.current.send(JSON.stringify({ a: 'subscribe', v: indexTokens }));
+                ws.current.send(JSON.stringify({ a: 'mode', v: ['full', indexTokens] }));
+                console.log('[KiteWS] Subscribed to indices only');
+            }
+
+            pendingSubs.current = [];
+
+            // Notify App so debug log shows connection confirmed
+            if (onMessageRef.current) onMessageRef.current('Login', { Error: null });
         };
 
         ws.current.onmessage = (event) => {
             try {
-                // Log raw event.data type for first message (binary vs string diagnostic)
-                msgCountRef.current++;
-                if (msgCountRef.current === 1) {
-                    console.log('[WS] First message received — data type:', typeof event.data,
-                        event.data instanceof Blob ? '(Blob)' : '(string)',
-                        'length:', event.data.length || event.data.size);
-                }
-
-                const msg = JSON.parse(event.data);
-                const { Type, Data } = msg;
-
-                // Track message type counts
-                msgTypesRef.current[Type] = (msgTypesRef.current[Type] || 0) + 1;
-
-                // Log first 5 messages in detail, then summary every 100
-                if (msgCountRef.current <= 5) {
-                    console.log(`[WS] msg #${msgCountRef.current} type=${Type}`, Type === 'Login' ? JSON.stringify(Data) : '');
-                } else if (msgCountRef.current % 100 === 0) {
-                    console.log(`[WS] msg #${msgCountRef.current} — totals:`, JSON.stringify(msgTypesRef.current));
-                }
-
-                // ---------- Activate session on first usable message ----------
-                if (!isReady.current) {
-                    if (Type === 'Login' && Data?.Error) {
-                        console.error('[WS] LOGIN FAILED:', Data.Error);
-                        return;
-                    }
-                    console.log('[WS] ✓ Session ACTIVE (triggered by msg type:', Type + ')');
-                    isLoggedIn.current = true;
-                    isReady.current = true;
-
-                    const activeQuotes = Array.from(activeSubscriptions.current.values());
-                    const freshQuotes = pendingSubs.current.flat().filter(q =>
-                        !activeSubscriptions.current.has(String(q.Tkn))
-                    );
-                    console.log('[WS] Pending subscriptions:', freshQuotes.length, '| Active (restore):', activeQuotes.length);
-
-                    const allTokens = [...activeQuotes, ...freshQuotes];
-                    const depthTokens = allTokens.filter(
-                        q => q.Xchg === 'NSEFO' || q.Xchg === 'BSEFO'
-                    );
-
-                    const indexTokens = [
-                        { Tkn: '26000', Xchg: 'NSE' },
-                        { Tkn: '26009', Xchg: 'NSE' },
-                        { Tkn: '1', Xchg: 'BSE' },
-                        ...allTokens.filter(q => ['NSE', 'BSE', 'NSECM', 'BSECM'].includes(q.Xchg))
-                    ].filter((v, i, a) => a.findIndex(t => t.Tkn === v.Tkn && t.Xchg === v.Xchg) === i);
-
-                    if (depthTokens.length > 0) {
-                        const payload = { Type: "TokenRequest", Data: { SubType: true, FeedType: 2, quotes: depthTokens } };
-                        ws.current.send(JSON.stringify(payload));
-                        console.log('[WS] → Sent Depth sub (FT2):', depthTokens.length, 'tokens');
-                        depthTokens.forEach(q => activeSubscriptions.current.set(String(q.Tkn), q));
-                    } else {
-                        console.log('[WS] No depth tokens to subscribe');
-                    }
-
-                    if (indexTokens.length > 0) {
-                        const payload = { Type: "TokenRequest", Data: { SubType: true, FeedType: 1, quotes: indexTokens } };
-                        ws.current.send(JSON.stringify(payload));
-                        console.log('[WS] → Sent Index/Touchline sub (FT1):', indexTokens.length, 'tokens:', indexTokens.map(t => t.Tkn));
-                        indexTokens.forEach(q => activeSubscriptions.current.set(String(q.Tkn), q));
-                    } else {
-                        console.log('[WS] No index tokens to subscribe');
-                    }
-
-                    console.log('[WS] Total active subscriptions:', activeSubscriptions.current.size);
-                    pendingSubs.current = [];
-
-                    if (Type === 'Login') return;
-                }
-
-                if (Type === 'Login') {
-                    console.log('[WS] Late Login response:', JSON.stringify(Data));
+                // Text messages (errors, order updates)
+                if (typeof event.data === 'string') {
+                    const text = event.data.trim();
+                    if (!text || !text.startsWith('{')) return;
+                    try {
+                        const msg = JSON.parse(text);
+                        if (msg.type === 'error') console.error('[KiteWS] Error:', msg.data);
+                        if (onMessageRef.current) onMessageRef.current(msg.type || 'Info', msg.data);
+                    } catch {}
                     return;
                 }
 
-                // 2. Buffer Depth & Index/MarketData Data
-                if ((Type === 'Depth' || Type === 'DepthData' || Type === 'IndexData' || Type === 'MarketData') && Data) {
+                // Binary market data
+                if (!(event.data instanceof ArrayBuffer)) return;
+                if (event.data.byteLength <= 1) return; // heartbeat
 
-                    // Normalize Data to Array for uniform processing
-                    const packets = Array.isArray(Data) ? Data : [Data];
+                const packets = parseBinaryMessage(event.data);
 
-                    packets.forEach(packet => {
-                        let token = packet.Tkn || packet.Token;
+                packets.forEach(packet => {
+                    const appToken = resolveAppToken(packet._instrumentToken);
+                    packet.Tkn = appToken;
+                    packet.Token = appToken;
 
-                        // IndexData usually has Symbol but no Token. Map them back.
-                        if (!token && Type === 'IndexData' && packet.Symbol) {
-                            const sym = packet.Symbol.toUpperCase();
-                            if (sym === 'NIFTY50' || sym === 'NIFTY 50') token = '26000';
-                            if (sym === 'NIFTYBANK' || sym === 'BANKNIFTY') token = '26009';
-                            if (sym === 'SENSEX') token = '1';
-                        }
+                    const tknStr = String(appToken);
+                    lastPacketTimes.current.set(tknStr, Date.now());
+                    packetRates.current[tknStr] = (packetRates.current[tknStr] || 0) + 1;
 
-                        if (token) {
-                            const tknStr = String(token);
-                            const receivedAt = Date.now();
-                            lastPacketTimes.current.set(tknStr, receivedAt);
-                            const enriched = {
-                                ...packet,
-                                Tkn: tknStr,           // ensure Tkn is always set (IndexData often lacks it)
-                                _type: Type,
-                                _receivedAt: receivedAt,
-                            };
-                            depthBuffer.current[tknStr] = enriched;
+                    // Buffer for depthData state (top-bar LTPs, MonitorDashboard polling)
+                    depthBuffer.current[tknStr] = packet;
 
-                            // Fire packet callback for ALL data types so consumers
-                            // can drive their own bucketing from event-driven WS
-                            // messages instead of throttled setInterval polling.
-                            // (Depth, DepthData, IndexData, MarketData all flow through.)
-                            if (onDepthPacketRef.current) {
-                                onDepthPacketRef.current(enriched);
-                            }
+                    // Event bus — all packet types so VerticalLayout / MonitorDashboard fire correctly
+                    if (onDepthPacketRef.current) {
+                        onDepthPacketRef.current(packet);
+                    }
+                });
 
-                            // Telemetry tracking
-                            packetRates.current[tknStr] = (packetRates.current[tknStr] || 0) + 1;
-                        }
-                    });
-                    return;
-                }
-
-                // 3. Telemetry Log every 5 seconds
+                // Telemetry every 5 seconds
                 if (Date.now() - lastTelemetry.current > 5000) {
-                    const stats = packetRates.current;
-                    const total = Object.values(stats).reduce((a, b) => a + b, 0);
-                    if (total > 0) {
-                        console.log('[WS] 5s Traffic Report:', JSON.stringify(stats));
-                    }
+                    const total = Object.values(packetRates.current).reduce((a, b) => a + b, 0);
+                    if (total > 0) console.log('[KiteWS] 5s Traffic:', JSON.stringify(packetRates.current));
                     packetRates.current = {};
                     lastTelemetry.current = Date.now();
                 }
-
-                // 3. Early ignore for high-volume packets
-                const ignoredTypes = ['Touchline', 'Quote'];
-                if (ignoredTypes.includes(Type)) return;
-
-                // 4. User callback for management pulses
-                if (onMessageRef.current) onMessageRef.current(Type, Data);
-
             } catch (err) {
-                console.error('[WS] Message parse/handle error:', err, '| raw data type:', typeof event.data, '| first 200 chars:', String(event.data).substring(0, 200));
+                console.error('[KiteWS] Message error:', err);
             }
         };
 
         ws.current.onclose = (event) => {
-            console.warn(`[WS] CLOSED code=${event.code} reason="${event.reason || 'Abnormal Closure'}" | wasReady=${isReady.current} | msgs received=${msgCountRef.current} | types=${JSON.stringify(msgTypesRef.current)}`);
+            console.warn(`[KiteWS] Closed: ${event.code} — ${event.reason || 'Unknown'}`);
             setStatus('disconnected');
-            isLoggedIn.current = false;
             isReady.current = false;
 
-            if (hbInterval.current) clearInterval(hbInterval.current);
             if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current);
-            if (handshakeTimeout.current) clearTimeout(handshakeTimeout.current);
 
             if (enabledRef.current) {
-                console.warn('[WS] Will reconnect in 2000ms...');
-                reconnectTimeout.current = setTimeout(connect, 2000);
-            } else {
-                console.log('[WS] Not reconnecting (disabled)');
+                console.warn('[KiteWS] Reconnecting in 3s...');
+                reconnectTimeout.current = setTimeout(connect, 3000);
             }
         };
 
-        ws.current.onerror = (err) => {
-            console.error('[WS] ERROR event — readyState:', ws.current?.readyState, '| isReady:', isReady.current);
+        ws.current.onerror = () => {
+            console.error('[KiteWS] WebSocket error');
             setStatus('error');
-            // Force-close so onclose fires and triggers reconnection.
-            // Without this, the connection can get stuck in 'error' state forever.
             try { ws.current?.close(); } catch {}
         };
 
-    }, []); // Only create connect once
+    }, [loadInstrumentMap, resolveInstrumentToken, resolveAppToken]);
 
-    // Watchdog State
-    const activeSubscriptions = useRef(new Map()); // Map<TokenID, QuoteObject>
-    const lastPacketTimes = useRef(new Map());     // Map<TokenID, Timestamp>
-    const watchdogInterval = useRef(null);
-
-    // Watchdog Interval
+    // ── Watchdog: resubscribe stale tokens ────────────────────────────
     useEffect(() => {
         if (!enabled) return;
 
-        watchdogInterval.current = setInterval(() => {
-            if (ws.current?.readyState !== WebSocket.OPEN) return;
+        const watchdog = setInterval(() => {
+            if (ws.current?.readyState !== WebSocket.OPEN || !isReady.current) return;
             if (activeSubscriptions.current.size === 0) return;
 
             const now = Date.now();
-            const staleQuotes = [];
+            const staleTokens = [];
 
             activeSubscriptions.current.forEach((quote, tkn) => {
                 const lastTime = lastPacketTimes.current.get(String(tkn)) || 0;
-                if (now - lastTime > 30000) { // Relax watchdog to 30s
-                    staleQuotes.push(quote);
+                if (now - lastTime > 30000) {
+                    const instToken = resolveInstrumentToken(tkn, quote.Xchg || 'NFO');
+                    if (instToken) staleTokens.push(instToken);
                     lastPacketTimes.current.set(String(tkn), now);
                 }
             });
 
-            if (staleQuotes.length > 0 && isReady.current) {
-                // Split stale quotes by their ORIGINAL FeedType. NSEFO/BSEFO
-                // were subscribed as FT2 (Depth); everything else (NSE/BSE
-                // cash + indices) was subscribed as FT1 (Touchline/Index).
-                // Sending all of them on FT2 was overwriting the FT1 stream
-                // and silently killing MarketData for the stock list.
-                const depthStale = staleQuotes.filter(q => q.Xchg === 'NSEFO' || q.Xchg === 'BSEFO');
-                const indexStale = staleQuotes.filter(q => q.Xchg !== 'NSEFO' && q.Xchg !== 'BSEFO');
-                console.warn('[WS] Watchdog resubscribing to stale tokens:', staleQuotes.length,
-                    `(FT1: ${indexStale.length}, FT2: ${depthStale.length})`);
-                if (indexStale.length > 0) {
-                    ws.current.send(JSON.stringify({
-                        Type: "TokenRequest",
-                        Data: { SubType: true, FeedType: 1, quotes: indexStale }
-                    }));
-                }
-                if (depthStale.length > 0) {
-                    ws.current.send(JSON.stringify({
-                        Type: "TokenRequest",
-                        Data: { SubType: true, FeedType: 2, quotes: depthStale }
-                    }));
-                }
+            if (staleTokens.length > 0) {
+                console.warn('[KiteWS] Watchdog resubscribing:', staleTokens.length, 'stale tokens');
+                ws.current.send(JSON.stringify({ a: 'subscribe', v: staleTokens }));
+                ws.current.send(JSON.stringify({ a: 'mode', v: ['full', staleTokens] }));
             }
-        }, 5000);
+        }, 15000);
 
-        return () => clearInterval(watchdogInterval.current);
+        return () => clearInterval(watchdog);
+    }, [enabled, resolveInstrumentToken]);
+
+    // ── depthData state sync (50ms batching) ──────────────────────────
+    useEffect(() => {
+        if (!enabled) return;
+
+        const syncInterval = setInterval(() => {
+            if (Object.keys(depthBuffer.current).length === 0) return;
+            const snapshot = { ...depthBuffer.current };
+            depthBuffer.current = {};
+            setDepthData(prev => ({ ...prev, ...snapshot }));
+        }, 50);
+
+        return () => clearInterval(syncInterval);
     }, [enabled]);
 
-    // Subscribe Function
+    // ── Subscribe (same API as old hook) ─────────────────────────────
+    // quotes = [{ Xchg, Tkn, Symbol }], feedType ignored (always full mode)
     const subscribe = useCallback((quotes, feedType = 2) => {
-        // 1. Track locally for persistence/watchdog
         quotes.forEach(q => {
             const tknStr = String(q.Tkn);
             activeSubscriptions.current.set(tknStr, q);
             lastPacketTimes.current.set(tknStr, Date.now());
         });
 
-        // 2. Send if ready, otherwise queue
         if (ws.current?.readyState === WebSocket.OPEN && isReady.current) {
-            const payload = {
-                Type: "TokenRequest",
-                Data: { SubType: true, FeedType: feedType, quotes }
-            };
-            console.log('[WS] Outbound Direct:', JSON.stringify(payload));
-            ws.current.send(JSON.stringify(payload));
+            const instrumentTokens = quotes.map(q =>
+                resolveInstrumentToken(q.Tkn, q.Xchg || 'NFO')
+            ).filter(Boolean);
+
+            if (instrumentTokens.length > 0) {
+                ws.current.send(JSON.stringify({ a: 'subscribe', v: instrumentTokens }));
+                ws.current.send(JSON.stringify({ a: 'mode', v: ['full', instrumentTokens] }));
+                console.log('[KiteWS] Subscribed:', instrumentTokens.length, 'tokens');
+            }
         } else {
-            console.log('[WS] Connection not ready, queueing subscription:', quotes.length);
+            console.log('[KiteWS] Not ready, queueing:', quotes.length, 'tokens');
             pendingSubs.current.push(quotes);
         }
-    }, []);
+    }, [resolveInstrumentToken]);
 
-    // Data Sync Loop (Phase 3)
-    useEffect(() => {
-        if (!enabled) return;
-
-        syncInterval.current = setInterval(() => {
-            const hasDepth = Object.keys(depthBuffer.current).length > 0;
-
-            if (hasDepth) {
-                // IMPORTANT: Capture buffer snapshot BEFORE clearing it
-                // React's functional updates are async, so clearing it immediately
-                // would result in an empty merge if we don't capture it.
-                const bufferSnapshot = { ...depthBuffer.current };
-                depthBuffer.current = {};
-
-                setDepthData(prev => ({
-                    ...prev,
-                    ...bufferSnapshot
-                }));
-            }
-        }, 50);
-
-        return () => clearInterval(syncInterval.current);
-    }, [enabled]);
-
-    // Init Effect
+    // ── Init Effect ───────────────────────────────────────────────────
     useEffect(() => {
         if (enabled) {
             connect();
@@ -402,11 +444,7 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
         }
         return () => {
             if (ws.current) ws.current.close();
-            if (hbInterval.current) clearInterval(hbInterval.current);
-            if (watchdogInterval.current) clearInterval(watchdogInterval.current);
             if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current);
-            if (syncInterval.current) clearInterval(syncInterval.current);
-            if (handshakeTimeout.current) clearTimeout(handshakeTimeout.current);
         };
     }, [enabled, connect]);
 
