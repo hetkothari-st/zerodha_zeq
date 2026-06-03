@@ -139,7 +139,7 @@ app.post('/api/set-access-token', async (req, res) => {
     console.log('[kite] Access token set directly');
 
     try {
-        await fetch('${process.env.WS_HUB_URL || 'http://127.0.0.1:8765'}/api/update-token', {
+        await fetch(`${process.env.WS_HUB_URL || 'http://127.0.0.1:8765'}/api/update-token`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ access_token }),
@@ -178,7 +178,7 @@ app.post('/api/exchange-token', async (req, res) => {
         console.log(`[kite] Token exchanged via API (user: ${data.data.user_id})`);
 
         try {
-            await fetch('${process.env.WS_HUB_URL || 'http://127.0.0.1:8765'}/api/update-token', {
+            await fetch(`${process.env.WS_HUB_URL || 'http://127.0.0.1:8765'}/api/update-token`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ access_token: data.data.access_token }),
@@ -246,7 +246,7 @@ app.get('/kite/callback', async (req, res) => {
         
         // Update ws-hub dynamically
         try {
-            await fetch('${process.env.WS_HUB_URL || 'http://127.0.0.1:8765'}/api/update-token', {
+            await fetch(`${process.env.WS_HUB_URL || 'http://127.0.0.1:8765'}/api/update-token`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ access_token: data.data.access_token })
