@@ -1,0 +1,15 @@
+{
+  "name": "zerodha-ws-hub",
+  "version": "1.0.0",
+  "description": "Zerodha WebSocket hub — single Kite connection, broadcast to N clients",
+  "main": "index.cjs",
+  "scripts": {
+    "start": "node index.cjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

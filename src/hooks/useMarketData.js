@@ -225,14 +225,15 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
 
     // ── Connect ───────────────────────────────────────────────────────
     const connect = useCallback(() => {
-        // If VITE_WS_HUB_URL is set, connect to the local hub instead of Zerodha directly.
-        // The hub holds the single Zerodha connection and relays ticks to all apps.
-        const hubUrl = import.meta.env.VITE_WS_HUB_URL || null;
+        // Connect to ws-hub on same hostname (port 8765) by default.
+        // Hub holds the single Zerodha connection and relays to all clients.
+        // VITE_WS_HUB_URL can override (e.g. different host/port).
+        const hubUrl = import.meta.env.VITE_WS_HUB_URL || `ws://${window.location.hostname}:8765`;
 
         if (!hubUrl) {
             const { API_KEY, ACCESS_TOKEN } = ZERODHA_CONFIG;
             if (!API_KEY || !ACCESS_TOKEN) {
-                console.error('[KiteWS] Missing API_KEY or ACCESS_TOKEN and no VITE_WS_HUB_URL set');
+                console.error('[KiteWS] Missing API_KEY or ACCESS_TOKEN and no hub available');
                 setStatus('error');
                 return;
             }
@@ -295,6 +296,11 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
                     if (!text || !text.startsWith('{')) return;
                     try {
                         const msg = JSON.parse(text);
+                        if (msg.type === 'auth_error') {
+                            console.error('[KiteWS] Token expired, redirecting to login...');
+                            window.location.href = '/kite/login';
+                            return;
+                        }
                         if (msg.type === 'error') console.error('[KiteWS] Error:', msg.data);
                         if (onMessageRef.current) onMessageRef.current(msg.type || 'Info', msg.data);
                     } catch {}

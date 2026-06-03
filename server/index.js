@@ -132,6 +132,66 @@ app.post('/api/force-logout', (req, res) => {
     return res.json({ ok: false, error: `${username} has no active session.` });
 });
 
+app.post('/api/set-access-token', async (req, res) => {
+    const { access_token } = req.body || {};
+    if (!access_token) return res.json({ ok: false, error: 'access_token required' });
+
+    console.log('[kite] Access token set directly');
+
+    try {
+        await fetch('${process.env.WS_HUB_URL || 'http://127.0.0.1:8765'}/api/update-token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ access_token }),
+        });
+        console.log('[kite] ws-hub notified');
+    } catch (err) {
+        console.warn('[kite] Could not notify ws-hub:', err.message);
+    }
+
+    return res.json({ ok: true, access_token });
+});
+
+app.post('/api/exchange-token', async (req, res) => {
+    const { request_token } = req.body || {};
+    if (!request_token) return res.json({ ok: false, error: 'request_token required' });
+    const ZERODHA_API_SECRET = process.env.ZERODHA_API_SECRET || '';
+    if (!ZERODHA_API_KEY || !ZERODHA_API_SECRET)
+        return res.json({ ok: false, error: 'ZERODHA_API_KEY or ZERODHA_API_SECRET not configured' });
+
+    try {
+        const checksum = crypto
+            .createHash('sha256')
+            .update(ZERODHA_API_KEY + request_token + ZERODHA_API_SECRET)
+            .digest('hex');
+
+        const tokenRes = await fetch('https://api.kite.trade/session/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Kite-Version': '3' },
+            body: new URLSearchParams({ api_key: ZERODHA_API_KEY, request_token, checksum }),
+        });
+
+        const data = await tokenRes.json();
+        if (data.status !== 'success' || !data.data?.access_token)
+            return res.json({ ok: false, error: data.message || 'Token exchange failed' });
+
+        console.log(`[kite] Token exchanged via API (user: ${data.data.user_id})`);
+
+        try {
+            await fetch('${process.env.WS_HUB_URL || 'http://127.0.0.1:8765'}/api/update-token', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ access_token: data.data.access_token }),
+            });
+        } catch (_) {}
+
+        return res.json({ ok: true, access_token: data.data.access_token });
+    } catch (err) {
+        console.error('[kite] exchange-token error:', err.message);
+        return res.json({ ok: false, error: err.message });
+    }
+});
+
 // Zerodha config endpoint — token is set manually in .env
 app.get('/api/kite-config', (req, res) => {
     return res.json({
@@ -139,6 +199,76 @@ app.get('/api/kite-config', (req, res) => {
         accessToken: ZERODHA_ACCESS_TOKEN,
         configured: !!(ZERODHA_API_KEY && ZERODHA_ACCESS_TOKEN),
     });
+});
+
+app.get('/kite/login', (req, res) => {
+    if (!ZERODHA_API_KEY) {
+        return res.status(400).send('ZERODHA_API_KEY not configured in .env');
+    }
+    const redirectUrl = `https://kite.zerodha.com/connect/login?v=3&api_key=${ZERODHA_API_KEY}`;
+    res.redirect(redirectUrl);
+});
+
+app.get('/kite/callback', async (req, res) => {
+    const { request_token, status } = req.query;
+
+    if (status !== 'success' || !request_token) {
+        console.error('[kite] Callback failed:', req.query);
+        return res.redirect('/?kite_error=callback_failed');
+    }
+
+    const ZERODHA_API_SECRET = process.env.ZERODHA_API_SECRET || '';
+
+    if (!ZERODHA_API_KEY || !ZERODHA_API_SECRET) {
+        console.error('[kite] ZERODHA_API_KEY or ZERODHA_API_SECRET not set');
+        return res.redirect('/?kite_error=not_configured');
+    }
+
+    try {
+        const checksum = crypto
+            .createHash('sha256')
+            .update(ZERODHA_API_KEY + request_token + ZERODHA_API_SECRET)
+            .digest('hex');
+
+        const tokenRes = await fetch('https://api.kite.trade/session/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Kite-Version': '3' },
+            body: new URLSearchParams({ api_key: ZERODHA_API_KEY, request_token, checksum }),
+        });
+
+        const data = await tokenRes.json();
+        if (data.status !== 'success' || !data.data?.access_token) {
+            console.error('[kite] Token exchange failed:', JSON.stringify(data));
+            return res.redirect('/?kite_error=token_exchange_failed');
+        }
+
+        console.log(`[kite] Access token exchanged (user: ${data.data.user_id})`);
+        
+        // Update ws-hub dynamically
+        try {
+            await fetch('${process.env.WS_HUB_URL || 'http://127.0.0.1:8765'}/api/update-token', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ access_token: data.data.access_token })
+            });
+            console.log('[kite] ws-hub notified of new token');
+        } catch (err) {
+            console.warn('[kite] Could not notify ws-hub (is it running?):', err.message);
+        }
+        
+        return res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Zerodha Auth</title>
+<style>body{background:#050505;color:#fff;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:12px}
+.ok{color:#4ade80;font-size:1.2rem;font-weight:bold}.sub{color:#ffffff60;font-size:.8rem}</style></head>
+<body><div class="ok">✓ Zerodha connected</div>
+<div class="sub">Token exchanged. You can close this tab.</div>
+<div class="sub">Return to the app tab to continue.</div>
+<script>if(window.opener)window.opener.postMessage('zerodha_connected','*');setTimeout(()=>window.close(),1500)</script></body></html>`);
+    } catch (err) {
+        console.error('[kite] Token exchange error:', err.message);
+        return res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Auth Error</title>
+<style>body{background:#050505;color:#fff;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}</style></head>
+<body style="color:#f87171">Auth error: ${err.message}</body></html>`);
+    }
 });
 
 // SPA fallback

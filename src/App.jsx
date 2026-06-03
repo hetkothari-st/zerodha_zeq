@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { Trash2, Activity, Plus, Search, X, FlaskConical, LogOut } from 'lucide-react';
+import { Trash2, Activity, Plus, Search, X, FlaskConical, LogOut, LogIn } from 'lucide-react';
 import { useMarketData } from './hooks/useMarketData';
 import MonitorDashboard from './components/MonitorDashboard';
 import { clsx } from 'clsx';
@@ -141,6 +141,10 @@ const AuthedApp = ({ user, logout }) => {
         const saved = localStorage.getItem('mt_ws_enabled');
         return saved !== null ? JSON.parse(saved) : true;
     });
+    const [requestToken, setRequestToken] = useState('');
+    const [tokenExchangeState, setTokenExchangeState] = useState('idle');
+    const [accessToken, setAccessToken] = useState('');
+    const [accessTokenState, setAccessTokenState] = useState('idle'); // idle | loading | error
 
     useEffect(() => {
         localStorage.setItem('mt_ws_enabled', JSON.stringify(isWsEnabled));
@@ -294,6 +298,46 @@ const AuthedApp = ({ user, logout }) => {
     }, []);
 
     const { status, depthData, subscribe } = useMarketData(isWsEnabled, handleRawMessage, handleDepthPacket, wsCredential);
+
+    const handleSetAccessToken = useCallback(async () => {
+        if (!accessToken.trim()) return;
+        setAccessTokenState('loading');
+        try {
+            const res = await fetch(`http://${window.location.hostname}:3000/api/set-access-token`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ access_token: accessToken.trim() }),
+            });
+            const data = await res.json();
+            if (!data.ok) { setAccessTokenState('error'); return; }
+            localStorage.setItem('kite_access_token', data.access_token);
+            setAccessToken('');
+            setAccessTokenState('idle');
+            setIsWsEnabled(true);
+        } catch {
+            setAccessTokenState('error');
+        }
+    }, [accessToken]);
+
+    const handleExchangeToken = useCallback(async () => {
+        if (!requestToken.trim()) return;
+        setTokenExchangeState('loading');
+        try {
+            const res = await fetch(`http://${window.location.hostname}:3000/api/exchange-token`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ request_token: requestToken.trim() }),
+            });
+            const data = await res.json();
+            if (!data.ok) { setTokenExchangeState('error'); return; }
+            localStorage.setItem('kite_access_token', data.access_token);
+            setRequestToken('');
+            setTokenExchangeState('idle');
+            setIsWsEnabled(true);
+        } catch {
+            setTokenExchangeState('error');
+        }
+    }, [requestToken]);
 
     const handleClearAll = () => {
         // Monitor-scoped clear — only the ACTIVE monitor gets wiped.
@@ -914,6 +958,53 @@ const AuthedApp = ({ user, logout }) => {
                     >
                         {isWsEnabled ? "Disconnect" : "Connect"}
                     </button>
+                    {status === 'error' && (
+                        <div className="flex items-center gap-1">
+                            <input
+                                type="text"
+                                value={accessToken}
+                                onChange={e => { setAccessToken(e.target.value); setAccessTokenState('idle'); }}
+                                onKeyDown={e => e.key === 'Enter' && handleSetAccessToken()}
+                                placeholder="access_token…"
+                                className={cn(
+                                    "w-36 bg-white/5 border rounded px-2 py-1 text-[9px] font-mono text-white/70 placeholder-white/20 outline-none focus:border-white/30 transition-colors",
+                                    accessTokenState === 'error' ? "border-red-500/50" : "border-emerald-500/20"
+                                )}
+                            />
+                            <button
+                                onClick={handleSetAccessToken}
+                                disabled={!accessToken.trim() || accessTokenState === 'loading'}
+                                className="text-[10px] px-2 py-1 rounded border border-emerald-500/20 bg-emerald-500/10 text-emerald-400 font-bold hover:bg-emerald-500/20 transition-all disabled:opacity-30"
+                            >
+                                {accessTokenState === 'loading' ? '…' : 'SET'}
+                            </button>
+                            <div className="w-px h-4 bg-white/10" />
+                            <a
+                                href={`http://${window.location.hostname}:3001/kite/login`}
+                                className="flex items-center gap-1 text-[10px] px-3 py-1 rounded border border-[#387ed1]/30 bg-[#387ed1]/10 text-[#387ed1] font-bold uppercase tracking-wider hover:bg-[#387ed1]/20 transition-all"
+                            >
+                                <LogIn size={10} /> Login
+                            </a>
+                            <input
+                                type="text"
+                                value={requestToken}
+                                onChange={e => { setRequestToken(e.target.value); setTokenExchangeState('idle'); }}
+                                onKeyDown={e => e.key === 'Enter' && handleExchangeToken()}
+                                placeholder="request_token…"
+                                className={cn(
+                                    "w-40 bg-white/5 border rounded px-2 py-1 text-[9px] font-mono text-white/70 placeholder-white/20 outline-none focus:border-white/30 transition-colors",
+                                    tokenExchangeState === 'error' ? "border-red-500/50" : "border-white/10"
+                                )}
+                            />
+                            <button
+                                onClick={handleExchangeToken}
+                                disabled={!requestToken.trim() || tokenExchangeState === 'loading'}
+                                className="text-[10px] px-2 py-1 rounded border border-emerald-500/20 bg-emerald-500/10 text-emerald-400 font-bold hover:bg-emerald-500/20 transition-all disabled:opacity-30"
+                            >
+                                {tokenExchangeState === 'loading' ? '…' : 'GO'}
+                            </button>
+                        </div>
+                    )}
                     <button
                         onClick={handleClearAll}
                         className="bg-red-500/10 text-red-500 hover:bg-red-500/20 border border-red-500/20 font-bold py-1 px-3 rounded text-[10px] flex items-center gap-2 uppercase tracking-wider"
