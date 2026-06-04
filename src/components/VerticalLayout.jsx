@@ -1,9 +1,14 @@
-import React, { useState, useMemo, useEffect, useRef, memo, useContext, createContext } from 'react';
-import { Eraser, Activity, ArrowUp, ArrowDown, X, GripVertical } from 'lucide-react';
+import React, { useState, useMemo, useEffect, useRef, memo, useContext, createContext, useCallback } from 'react';
+import { createPortal } from 'react-dom';
+import { Eraser, Activity, ArrowUp, ArrowDown, X, GripVertical, Zap, TrendingUp, TrendingDown } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'framer-motion';
 import stocksData from '../stocks_nsecm.json';
+import {
+    FLOW_THRESHOLD, DP_WINDOW, intervalPriceQty, bvcBuyFraction,
+    foldFlow, emptyFlowBucket, reBucketFlow, computeFlowStats,
+} from '../lib/orderFlow';
 
 function cn(...inputs) {
     return twMerge(clsx(inputs));
@@ -208,11 +213,29 @@ const candleOf = (row) =>
 
 const ROW_HEIGHT = 26; // px — used to align value rows
 
+// Short rising chime when a bucket crosses the order-flow threshold (≥1 lakh).
+const playFlowAlert = () => {
+    try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        const now = ctx.currentTime;
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(660, now);
+        osc.frequency.exponentialRampToValueAtTime(1320, now + 0.18);
+        gain.gain.setValueAtTime(0.0001, now);
+        gain.gain.exponentialRampToValueAtTime(0.25, now + 0.04);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.5);
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.start(now); osc.stop(now + 0.52);
+    } catch { /* audio unavailable */ }
+};
+
 // ---------- Single VALUE row ----------
 // MIN | arrow + Δ VOL
 const VALUES_GRID = "grid grid-cols-[46px_1fr] items-center gap-1 px-2";
 
-const MinuteRow = memo(React.forwardRef(({ row, isLatest, prevDelta, consensus, isPinned }, ref) => {
+const MinuteRow = memo(React.forwardRef(({ row, isLatest, prevDelta, consensus, isPinned, isHot, onOpen, stockId }, ref) => {
     const isRecent = row.timestamp ? (Date.now() - row.timestamp <= 60000) : false;
     const candle = candleOf(row);
 
@@ -238,6 +261,8 @@ const MinuteRow = memo(React.forwardRef(({ row, isLatest, prevDelta, consensus, 
             exit={{ opacity: 0 }}
             transition={{ duration: 0.18 }}
             style={{ height: ROW_HEIGHT }}
+            onClick={isHot && onOpen ? () => onOpen(stockId, row.minute) : undefined}
+            title={isHot ? 'Click for buy/sell breakdown' : undefined}
             className={cn(
                 VALUES_GRID,
                 "border-b last:border-0 transition-all overflow-hidden",
@@ -256,17 +281,21 @@ const MinuteRow = memo(React.forwardRef(({ row, isLatest, prevDelta, consensus, 
                 isPinned && "border-l-2",
                 isPinned && consensus === 'up' && "border-l-emerald-400",
                 isPinned && consensus === 'down' && "border-l-red-400",
+                // ----- HOT (≥1 lakh): clickable, ringed, sits above the rest -----
+                isHot && "cursor-pointer ring-1 ring-orange-400/70 ring-inset bg-orange-500/15 hover:bg-orange-500/25",
             )}
         >
             {/* MIN */}
             <span className={cn(
-                "font-mono font-black whitespace-nowrap text-left tabular-nums tracking-tight text-[13px]",
+                "font-mono font-black whitespace-nowrap text-left tabular-nums tracking-tight text-[13px] flex items-center gap-1",
+                isHot                ? "text-orange-200" :
                 consensus === 'up'   ? "text-emerald-200" :
                 consensus === 'down' ? "text-red-200" :
                 isLatest             ? "text-amber-200" :
                 isRecent             ? "text-blue-200" :
                                        "text-blue-500"
             )}>
+                {isHot && <Zap size={10} className="text-orange-400 flex-shrink-0" fill="currentColor" />}
                 {row.minute}
             </span>
 
@@ -276,6 +305,7 @@ const MinuteRow = memo(React.forwardRef(({ row, isLatest, prevDelta, consensus, 
                     n={row.delta}
                     className={cn(
                         "tracking-tight font-black text-[15px]",
+                        isHot                ? "text-orange-200" :
                         consensus === 'up'   ? "text-emerald-200" :
                         consensus === 'down' ? "text-red-200" :
                                                valueColorCls
@@ -293,7 +323,10 @@ const MinuteRow = memo(React.forwardRef(({ row, isLatest, prevDelta, consensus, 
     prev.isLatest === next.isLatest &&
     prev.prevDelta === next.prevDelta &&
     prev.consensus === next.consensus &&
-    prev.isPinned === next.isPinned
+    prev.isPinned === next.isPinned &&
+    prev.isHot === next.isHot &&
+    prev.onOpen === next.onOpen &&
+    prev.stockId === next.stockId
 );
 
 // ---------- VolumeChart ----------
@@ -1103,6 +1136,7 @@ const StockColumn = ({
     bucketSize,
     intVolMinutes, onChangeIntVol,
     consensusByMinute = {},
+    onOpenFlow,
 }) => {
     const forceUnit = useContext(VolumeUnitContext);
     const visible = useMemo(() => history.slice(-250), [history]);
@@ -1295,6 +1329,7 @@ const StockColumn = ({
                             ) : (
                                 regularRows.map((row, idx, arr) => {
                                     const prevDelta = arr[idx + 1]?.delta ?? null;
+                                    const hot = (row.delta || 0) >= FLOW_THRESHOLD;
                                     return (
                                         <MinuteRow
                                             key={row.minute}
@@ -1302,6 +1337,9 @@ const StockColumn = ({
                                             isLatest={idx === 0}
                                             prevDelta={prevDelta}
                                             consensus={consensusByMinute[row.minute] || null}
+                                            isHot={hot}
+                                            onOpen={hot ? onOpenFlow : undefined}
+                                            stockId={stock.id}
                                         />
                                     );
                                 })
@@ -1316,16 +1354,22 @@ const StockColumn = ({
                     {pinnedRows.length > 0 && (
                         <div className="flex-shrink-0 border-t-2 border-amber-500/40 bg-black/40">
                             <AnimatePresence initial={false} mode="popLayout">
-                                {pinnedRows.map((row) => (
-                                    <MinuteRow
-                                        key={`pinned-${row.minute}`}
-                                        row={row}
-                                        isLatest={false}
-                                        prevDelta={null}
-                                        consensus={consensusByMinute[row.minute] || null}
-                                        isPinned
-                                    />
-                                ))}
+                                {pinnedRows.map((row) => {
+                                    const hot = (row.delta || 0) >= FLOW_THRESHOLD;
+                                    return (
+                                        <MinuteRow
+                                            key={`pinned-${row.minute}`}
+                                            row={row}
+                                            isLatest={false}
+                                            prevDelta={null}
+                                            consensus={consensusByMinute[row.minute] || null}
+                                            isPinned
+                                            isHot={hot}
+                                            onOpen={hot ? onOpenFlow : undefined}
+                                            stockId={stock.id}
+                                        />
+                                    );
+                                })}
                             </AnimatePresence>
                         </div>
                     )}
@@ -1404,6 +1448,153 @@ const StockColumn = ({
     );
 };
 
+// ---------- Order-flow drill-down modal ----------
+// Opened by clicking a HOT (≥1 lakh) minute row. Shows the approximated
+// buy-side / sell-side split for that bucket and compares each side's VWAP to
+// the live price to flag relative loss / profit. Updates live while open.
+const fmtPrice = (n) => (Number.isFinite(n) ? Number(n).toFixed(2) : '—');
+
+const FlowModal = ({ data, onClose }) => {
+    useEffect(() => {
+        const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+        document.addEventListener('keydown', onKey);
+        return () => document.removeEventListener('keydown', onKey);
+    }, [onClose]);
+
+    const { stock, minute, totalDelta, priceOpen, priceClose, liveLtp, stats } = data;
+    const candle = priceClose != null && priceOpen != null
+        ? (priceClose > priceOpen ? 'up' : priceClose < priceOpen ? 'down' : 'flat') : 'flat';
+
+    const buyPct = stats ? Math.round(stats.buyPct * 100) : 0;
+    const sellPct = stats ? Math.round(stats.sellPct * 100) : 0;
+
+    // gap > 0 means the side filled BELOW the live price.
+    const gapTag = (gap, gapPct, kind) => {
+        if (gap == null) return null;
+        const below = gap > 0; // filled below current price
+        // SELL below current = sold into a relative loss / left money on table.
+        // BUY  below current = bought cheap, now in profit.
+        const good = kind === 'buy' ? below : !below;
+        return (
+            <div className={cn(
+                "mt-2 flex items-center gap-1.5 text-[11px] font-bold rounded px-2 py-1",
+                good ? "bg-emerald-500/10 text-emerald-300" : "bg-red-500/10 text-red-300"
+            )}>
+                {good ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
+                <span>
+                    {kind === 'sell'
+                        ? (below ? 'Sold below live — into loss' : 'Sold above live — sold well')
+                        : (below ? 'Bought below live — in profit' : 'Bought above live — underwater')}
+                </span>
+                <span className="ml-auto font-mono tabular-nums">
+                    {gap > 0 ? '−' : '+'}₹{fmtPrice(Math.abs(gap))}
+                    {gapPct != null && <span className="opacity-70"> ({Math.abs(gapPct).toFixed(2)}%)</span>}
+                </span>
+            </div>
+        );
+    };
+
+    return (
+        <div
+            className="fixed inset-0 z-[80] flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+            onClick={onClose}
+        >
+            <div
+                onClick={(e) => e.stopPropagation()}
+                className="w-full max-w-md bg-[#0f1115]/97 border-2 border-orange-500/40 rounded-2xl shadow-[0_0_60px_rgba(249,115,22,0.25)] overflow-hidden"
+            >
+                {/* Header */}
+                <div className="flex items-center gap-2 px-4 py-3 border-b border-white/10 bg-[#15171c]">
+                    <Zap size={15} className="text-orange-400" fill="currentColor" />
+                    <span className="text-cyan-400 text-[16px] font-black tracking-tight">{stock.symbol}</span>
+                    <span className="text-white/40 text-[13px] font-mono">{minute}</span>
+                    <span className="ml-auto flex items-center gap-1.5 bg-white/5 px-2 py-0.5 rounded border border-white/10">
+                        <span className="text-[9px] text-white/40 uppercase font-bold">Live</span>
+                        <span className="text-[13px] font-bold text-yellow-500 font-mono tabular-nums">{fmtPrice(liveLtp)}</span>
+                    </span>
+                    <button onClick={onClose} className="ml-1 text-white/40 hover:text-white p-1" title="Close (Esc)">
+                        <X size={16} />
+                    </button>
+                </div>
+
+                {/* Spike summary */}
+                <div className="px-4 py-3 flex items-center justify-between border-b border-white/5">
+                    <div>
+                        <div className="text-[9px] uppercase tracking-wider text-orange-400/80 font-black">Volume spike</div>
+                        <VolCell n={totalDelta} className="text-orange-200 text-[20px] font-black justify-start" unitClassName="text-[13px]" />
+                    </div>
+                    <div className="text-right">
+                        <div className="text-[9px] uppercase tracking-wider text-white/40 font-black">O → C</div>
+                        <div className={cn("text-[13px] font-mono font-bold tabular-nums",
+                            candle === 'up' ? "text-emerald-300" : candle === 'down' ? "text-red-300" : "text-white/60")}>
+                            {fmtPrice(priceOpen)} → {fmtPrice(priceClose)}
+                        </div>
+                    </div>
+                </div>
+
+                {/* Buy / Sell split bar */}
+                <div className="px-4 pt-3">
+                    <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-wider mb-1">
+                        <span className="text-emerald-400">Buy {buyPct}%</span>
+                        <span className="text-red-400">Sell {sellPct}%</span>
+                    </div>
+                    <div className="h-2 w-full rounded-full overflow-hidden bg-white/5 flex">
+                        <div className="bg-emerald-500/70 h-full transition-[width] duration-500" style={{ width: `${buyPct}%` }} />
+                        <div className="bg-red-500/70 h-full transition-[width] duration-500" style={{ width: `${sellPct}%` }} />
+                    </div>
+                </div>
+
+                {/* Side panels */}
+                <div className="grid grid-cols-2 gap-2 p-4 pt-3">
+                    {/* BUY */}
+                    <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/[0.05] p-3">
+                        <div className="flex items-center gap-1 text-emerald-400 text-[10px] font-black uppercase tracking-wider">
+                            <TrendingUp size={12} /> Buy side
+                        </div>
+                        <div className="mt-2 text-[9px] text-white/40 uppercase font-bold">Qty</div>
+                        <VolCell n={stats?.buyQty ?? 0} className="text-emerald-200 text-[15px] font-black justify-start" unitClassName="text-[11px]" />
+                        <div className="mt-1.5 text-[9px] text-white/40 uppercase font-bold">VWAP</div>
+                        <div className="text-emerald-200 text-[15px] font-black font-mono tabular-nums">₹{fmtPrice(stats?.buyVwap)}</div>
+                        {gapTag(stats?.buyGap, stats?.buyGapPct, 'buy')}
+                    </div>
+                    {/* SELL */}
+                    <div className="rounded-lg border border-red-500/25 bg-red-500/[0.05] p-3">
+                        <div className="flex items-center gap-1 text-red-400 text-[10px] font-black uppercase tracking-wider">
+                            <TrendingDown size={12} /> Sell side
+                        </div>
+                        <div className="mt-2 text-[9px] text-white/40 uppercase font-bold">Qty</div>
+                        <VolCell n={stats?.sellQty ?? 0} className="text-red-200 text-[15px] font-black justify-start" unitClassName="text-[11px]" />
+                        <div className="mt-1.5 text-[9px] text-white/40 uppercase font-bold">VWAP</div>
+                        <div className="text-red-200 text-[15px] font-black font-mono tabular-nums">₹{fmtPrice(stats?.sellVwap)}</div>
+                        {gapTag(stats?.sellGap, stats?.sellGapPct, 'sell')}
+                    </div>
+                </div>
+
+                {/* Net verdict */}
+                <div className="px-4 pb-2">
+                    <div className={cn(
+                        "rounded-lg px-3 py-2 text-[12px] font-bold flex items-center gap-2",
+                        stats?.net === 'buy' ? "bg-emerald-500/10 text-emerald-300"
+                            : stats?.net === 'sell' ? "bg-red-500/10 text-red-300"
+                                : "bg-white/5 text-white/60"
+                    )}>
+                        {stats?.net === 'buy' ? <TrendingUp size={14} /> : stats?.net === 'sell' ? <TrendingDown size={14} /> : <Activity size={14} />}
+                        {stats?.net === 'buy' ? 'Net BUYING — aggressors lifted the offer'
+                            : stats?.net === 'sell' ? 'Net SELLING — aggressors hit the bid'
+                                : 'Balanced flow'}
+                    </div>
+                </div>
+
+                {/* Approximation disclaimer */}
+                <div className="px-4 pb-3 text-[9px] leading-relaxed text-white/30">
+                    Estimated from 1/sec snapshots — exact qty &amp; VWAP, side inferred (Lee-Ready ≈80-85%).
+                    Not a literal trade tape; Kite does not expose tick-by-tick aggressor data.
+                </div>
+            </div>
+        </div>
+    );
+};
+
 // ---------- Main Vertical Layout ----------
 const VerticalLayout = ({
     visibleElements,
@@ -1443,7 +1634,7 @@ const VerticalLayout = ({
     }, [extraStocks]);
 
     // ---------- localStorage persistence ----------
-    const STORAGE_KEY = `vl_state_v2${keySuffix}`; // bumped because schema added priceOpen/Close
+    const STORAGE_KEY = `vl_state_v3${keySuffix}`; // bumped: added order-flow buckets
     const todayKey = () => {
         const d = new Date();
         return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
@@ -1504,6 +1695,24 @@ const VerticalLayout = ({
         return base;
     });
 
+    // Per-stock RAW 15s order-flow buckets (buy/sell qty + turnover). Source of
+    // truth for the buy/sell-side approximation; aggregated to the active
+    // timeframe via `displayedFlow` below.
+    const [flow, setFlow] = useState(() => {
+        const persisted = loadPersisted();
+        const base = {};
+        for (const s of STOCK_LIST) base[s.id] = [];
+        if (persisted?.flow) {
+            for (const s of STOCK_LIST) {
+                if (Array.isArray(persisted.flow[s.id])) base[s.id] = persisted.flow[s.id];
+            }
+        }
+        return base;
+    });
+
+    // Which (stockId, minute) flow event is open in the drill-down modal.
+    const [openFlow, setOpenFlow] = useState(null);
+
     // ---------- Column ORDER (drag-and-drop) ----------
     const ORDER_KEY = `vl_column_order_v1${keySuffix}`;
     const [columnOrder, setColumnOrder] = useState(() => {
@@ -1549,6 +1758,13 @@ const VerticalLayout = ({
         return reBucketHistories(histories, bucketSize);
     }, [histories, bucketSize]);
 
+    // Order-flow aggregated to the active timeframe, keyed identically to the
+    // displayed histories so a hot minute's bucket lines up by `minute`.
+    const displayedFlow = useMemo(
+        () => reBucketFlow(flow, (ts) => fmtBucket(ts, bucketSize)),
+        [flow, bucketSize]
+    );
+
     // ---------- Per-minute candle CONSENSUS across all tracked stocks ----------
     // For each minute, if EVERY tracked stock has a row for that minute AND
     // every one of those rows has the SAME candle direction (all green or all
@@ -1580,6 +1796,57 @@ const VerticalLayout = ({
         }
         return map;
     }, [orderedStocks, displayedHistories]);
+
+    // ---------- Threshold alert: chime once when a bucket crosses ≥1 lakh ----------
+    const alertedRef = useRef(new Set());
+    // Reset on timeframe change so labels match the new bucketing, and close
+    // any open drill-down (its minute key no longer maps to the new buckets).
+    useEffect(() => { alertedRef.current = new Set(); setOpenFlow(null); }, [bucketSize]);
+    useEffect(() => {
+        const nowTs = Date.now();
+        // A freshly-formed bucket carries the last packet's timestamp, which can
+        // be up to one bucket-period old, so scale the staleness window to it.
+        const staleMs = Math.max(120000, bucketSize * 60 * 1000 * 2);
+        for (const s of orderedStocks) {
+            const rows = displayedHistories[s.id] || [];
+            for (let i = Math.max(0, rows.length - 2); i < rows.length; i++) {
+                const r = rows[i];
+                if (!r || (r.delta || 0) < FLOW_THRESHOLD) continue;
+                if (r.timestamp && nowTs - r.timestamp > staleMs) continue; // skip stale
+                const key = `${s.id}:${r.minute}`;
+                if (alertedRef.current.has(key)) continue;
+                alertedRef.current.add(key);
+                playFlowAlert();
+            }
+        }
+    }, [displayedHistories, orderedStocks, bucketSize]);
+
+    // Stable handler for opening the drill-down (keeps MinuteRow memo intact).
+    const handleOpenFlow = useCallback((stockId, minute) => {
+        setOpenFlow({ stockId, minute });
+    }, []);
+
+    // Live stats for the open drill-down modal (recomputed each render so the
+    // modal updates against the live price while open).
+    const openFlowData = useMemo(() => {
+        if (!openFlow) return null;
+        const stock = STOCK_LIST.find(s => s.id === openFlow.stockId);
+        if (!stock) return null;
+        const fRows = displayedFlow[openFlow.stockId] || [];
+        const hRows = displayedHistories[openFlow.stockId] || [];
+        const bucket = fRows.find(r => r.minute === openFlow.minute) || null;
+        const hRow = hRows.find(r => r.minute === openFlow.minute) || null;
+        const liveLtp = snapshots[openFlow.stockId]?.ltp ?? null;
+        return {
+            stock,
+            minute: openFlow.minute,
+            totalDelta: hRow?.delta ?? null,
+            priceOpen: hRow?.priceOpen ?? null,
+            priceClose: hRow?.priceClose ?? null,
+            stats: computeFlowStats(bucket, liveLtp),
+            liveLtp,
+        };
+    }, [openFlow, displayedFlow, displayedHistories, snapshots, STOCK_LIST]);
 
     // ---------- Column WIDTHS (resizable) ----------
     const WIDTHS_KEY = `vl_column_widths_v1${keySuffix}`;
@@ -1716,6 +1983,14 @@ const VerticalLayout = ({
             }
             return changed ? next : prev;
         });
+        setFlow(prev => {
+            const next = { ...prev };
+            let changed = false;
+            for (const s of STOCK_LIST) {
+                if (!(s.id in next)) { next[s.id] = []; changed = true; }
+            }
+            return changed ? next : prev;
+        });
     }, [STOCK_LIST]);
 
     // depthData mirror so the sampling effect doesn't reset every 50ms
@@ -1774,6 +2049,7 @@ const VerticalLayout = ({
                     bucketSize: RAW_BUCKET_MINUTES,
                     histories: histRef.current,
                     snapshots: snapRef.current,
+                    flow: flowRef.current,
                 }));
             } catch { }
         };
@@ -1819,15 +2095,25 @@ const VerticalLayout = ({
     // Mutable per-stock state. These are the source of truth for bucketing.
     const historiesRef = useRef(histories);
     const snapshotsRef = useRef(snapshots);
+    const flowRef = useRef(flow);
+    // Dirty flags so the render-sync interval only re-renders on change.
+    // Declared before processPacket because the useCallback captures them.
+    const historiesDirtyRef = useRef(false);
+    const snapshotsDirtyRef = useRef(false);
+    const flowDirtyRef = useRef(false);
+    // Last snapshot per stock { vol, atp, ltp, vwap, dpWindow } — used to
+    // classify the interval between consecutive packets.
+    const flowPrevRef = useRef({});
     // Keep refs in sync with state when state changes from outside (clear,
     // remove, persistence load, etc).
     useEffect(() => { historiesRef.current = histories; }, [histories]);
     useEffect(() => { snapshotsRef.current = snapshots; }, [snapshots]);
+    useEffect(() => { flowRef.current = flow; }, [flow]);
 
     // The packet processor — runs synchronously inside the WS message handler.
     // All inputs (stock list, bucket size, ws status) are read from refs so
-    // this function never goes stale.
-    const processPacket = (packet) => {
+    // this function never goes stale. MUST only read refs, never state/props.
+    const processPacket = useCallback((packet) => {
         if (!packet) return;
         if (wsStatusRef.current !== 'connected') return;
         // Freeze state outside market hours — no new rows, no bucket updates.
@@ -1842,6 +2128,10 @@ const VerticalLayout = ({
         const vol = readField(packet, VOLUME_KEYS);
         const ltp = readField(packet, PRICE_KEYS);
         if (vol === null && ltp === null) return;
+
+        // Order-flow input: ATP gives the exact interval VWAP via turnover
+        // deltas (see src/lib/orderFlow.js). Optional — falls back to LTP.
+        const atp = readField(packet, ['ATP', 'atp', 'AvgTradePrice', 'AverageTradePrice']);
 
         const now = packet._receivedAt || Date.now();
         // ALWAYS bucket the source-of-truth at raw 15-second granularity. The
@@ -1917,12 +2207,57 @@ const VerticalLayout = ({
             };
             historiesDirtyRef.current = true;
         }
-    };
 
-    // Dirty flags so the render-sync interval only re-renders when something
-    // actually changed. Avoids waste between ticks.
-    const historiesDirtyRef = useRef(false);
-    const snapshotsDirtyRef = useRef(false);
+        // ----- order-flow (buy/sell side approximation, BVC) -----
+        // Classify the trades since the previous snapshot and fold the
+        // fractional buy/sell split into the matching 15s flow bucket.
+        const prev = flowPrevRef.current[stock.id];
+        // Day-counter reset (TTQ resets each trading day): drop the stale
+        // baseline so the next interval starts clean.
+        if (prev && vol < (prev.vol || 0)) {
+            flowPrevRef.current[stock.id] = { vol, atp, ltp, vwap: null, dpWindow: [] };
+        } else if (prev) {
+            const pq = intervalPriceQty(prev, { vol, atp, ltp });
+            if (pq) {
+                const dp = prev.vwap != null ? pq.vwap - prev.vwap : 0;
+                const dpWindow = [...(prev.dpWindow || []).slice(-(DP_WINDOW - 1)), dp];
+                const buyFrac = bvcBuyFraction(dp, dpWindow);
+                const buyQty = pq.qty * buyFrac;
+                const sellQty = pq.qty - buyQty;
+                const split = {
+                    buyQty, sellQty,
+                    buyTurnover: buyQty * pq.vwap,
+                    sellTurnover: sellQty * pq.vwap,
+                };
+                const farr = flowRef.current[stock.id] || [];
+                const flast = farr[farr.length - 1];
+                if (!flast || flast.minute !== minuteKey) {
+                    const fresh = foldFlow(emptyFlowBucket(minuteKey, now), split);
+                    let next = [...farr, fresh];
+                    if (next.length > 1500) next = next.slice(-1500);
+                    flowRef.current = { ...flowRef.current, [stock.id]: next };
+                } else {
+                    const merged = foldFlow({ ...flast }, split);
+                    merged.timestamp = now;
+                    flowRef.current = {
+                        ...flowRef.current,
+                        [stock.id]: [...farr.slice(0, -1), merged],
+                    };
+                }
+                flowDirtyRef.current = true;
+                flowPrevRef.current[stock.id] = { vol, atp, ltp, vwap: pq.vwap, dpWindow };
+            } else {
+                // No trade this interval — preserve volatility window + last VWAP.
+                flowPrevRef.current[stock.id] = {
+                    vol, atp, ltp, vwap: prev.vwap, dpWindow: prev.dpWindow || [],
+                };
+            }
+        } else {
+            // First snapshot for this stock — establish the baseline.
+            flowPrevRef.current[stock.id] = { vol, atp, ltp, vwap: null, dpWindow: [] };
+        }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     // ----- Subscribe to the packet event bus -----
     useEffect(() => {
@@ -1947,6 +2282,10 @@ const VerticalLayout = ({
                 setSnapshots(snapshotsRef.current);
                 snapshotsDirtyRef.current = false;
             }
+            if (flowDirtyRef.current) {
+                setFlow(flowRef.current);
+                flowDirtyRef.current = false;
+            }
         };
         const id = setInterval(flushToState, 1000);
 
@@ -1967,10 +2306,18 @@ const VerticalLayout = ({
 
     const handleClear = (stockId) => {
         setHistories(prev => ({ ...prev, [stockId]: [] }));
+        // Reset the ref too — processPacket writes straight into it, so the
+        // state setter alone would be stomped back by the next packet.
+        flowRef.current = { ...flowRef.current, [stockId]: [] };
+        setFlow(prev => ({ ...prev, [stockId]: [] }));
+        delete flowPrevRef.current[stockId];
     };
 
     const handleClearAll = () => {
         setHistories(Object.fromEntries(STOCK_LIST.map(s => [s.id, []])));
+        flowRef.current = Object.fromEntries(STOCK_LIST.map(s => [s.id, []]));
+        setFlow(Object.fromEntries(STOCK_LIST.map(s => [s.id, []])));
+        flowPrevRef.current = {};
         try { localStorage.removeItem(STORAGE_KEY); } catch { }
     };
 
@@ -1986,6 +2333,11 @@ const VerticalLayout = ({
             delete next[stockId];
             return next;
         });
+        const nextFlow = { ...flowRef.current };
+        delete nextFlow[stockId];
+        flowRef.current = nextFlow;
+        setFlow(nextFlow);
+        delete flowPrevRef.current[stockId];
     };
 
     // Listen for the global "Clear" button in App.jsx top bar. The event
@@ -2047,6 +2399,7 @@ const VerticalLayout = ({
                                     intVolMinutes={intVolMinutes[stock.id] ?? 5}
                                     onChangeIntVol={handleChangeIntVol}
                                     consensusByMinute={consensusByMinute}
+                                    onOpenFlow={handleOpenFlow}
                                 />
                             ))}
                         </Reorder.Group>
@@ -2064,6 +2417,11 @@ const VerticalLayout = ({
                     </div>
                 </div>
             </div>
+
+            {openFlow && openFlowData && createPortal(
+                <FlowModal data={openFlowData} onClose={() => setOpenFlow(null)} />,
+                document.body
+            )}
         </VolumeUnitContext.Provider>
     );
 };
