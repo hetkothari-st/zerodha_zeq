@@ -36,6 +36,21 @@ test('compact mode shows only the top 3', () => {
     expect(within(screen.getByTestId('eq-board')).getAllByRole('listitem')).toHaveLength(3);
 });
 
+test('rank-change arrows render after a tick', () => {
+    vi.useFakeTimers();
+    render(<MarketPanel />);
+    const board = screen.getByTestId('eq-board');
+    const arrowOf = (li) => li.querySelectorAll('span')[1].textContent;
+    const arrowsBefore = within(board).getAllByRole('listitem').map(arrowOf);
+    expect(arrowsBefore.length).toBeGreaterThan(0);
+    expect(arrowsBefore.every((a) => a === '•')).toBe(true);
+    act(() => { vi.advanceTimersByTime(1800); });
+    const arrowsAfter = within(board).getAllByRole('listitem').map(arrowOf);
+    expect(arrowsAfter.length).toBeGreaterThan(0);
+    expect(arrowsAfter.every((a) => a === '▲' || a === '▼' || a === '•')).toBe(true);
+    vi.useRealTimers();
+});
+
 test('theme exposes every class key the screens use', () => {
     for (const k of ['page', 'panel', 'formSide', 'title', 'subtitle', 'label', 'input', 'primary', 'secondary', 'google', 'divider',
         'tabs', 'tabOn', 'tabOff', 'link', 'muted', 'error', 'info', 'card', 'modal', 'modalCard', 'adminPage']) {

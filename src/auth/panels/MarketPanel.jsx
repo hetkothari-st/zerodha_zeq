@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveMotion } from './useLiveMotion';
 
 const mono = "font-['JetBrains_Mono',monospace]";
@@ -18,30 +18,39 @@ function rowsFor(mode, rand) {
     return mode.names.map(([name, price]) => ({ name, price, change: 0.5 + rand() * 3.5 }));
 }
 
+function rankMap(rows) {
+    return Object.fromEntries([...rows].sort((a, b) => b.change - a.change).map((r, i) => [r.name, i]));
+}
+
 // Illustrative NSE movers leaderboard for the Funnel Eq auth screens (spec §3.2). Not real market data.
 export default function MarketPanel({ compact = false }) {
     const live = useLiveMotion();
     const rand = useMemo(() => seeded(11), []);
     const [modeIdx, setModeIdx] = useState(0);
     const mode = MODES[modeIdx];
-    const [rows, setRows] = useState(() => rowsFor(MODES[0], seeded(11)));
-    const [prevRank, setPrevRank] = useState({});
+    const [board, setBoard] = useState(() => ({ rows: rowsFor(MODES[0], seeded(11)), prevRank: {} }));
+    const lastModeIdx = useRef(modeIdx);
 
-    useEffect(() => { setRows(rowsFor(mode, rand)); setPrevRank({}); }, [mode, rand]);
+    useEffect(() => {
+        if (lastModeIdx.current === modeIdx) return; // initial state already matches mode 0; skip redundant mount reset
+        lastModeIdx.current = modeIdx;
+        setBoard({ rows: rowsFor(mode, rand), prevRank: {} });
+    }, [mode, modeIdx, rand]);
 
     useEffect(() => {
         if (!live) return undefined;
         const tick = setInterval(() => {
-            setRows((rs) => {
-                const before = Object.fromEntries([...rs].sort((a, b) => b.change - a.change).map((r, i) => [r.name, i]));
-                setPrevRank(before);
-                return rs.map((r) => ({ ...r, change: Math.max(0.1, r.change + (rand() - 0.5) * 0.9) }));
+            setBoard(({ rows }) => {
+                const before = rankMap(rows);
+                const nextRows = rows.map((r) => ({ ...r, change: Math.max(0.1, r.change + (rand() - 0.5) * 0.9) }));
+                return { rows: nextRows, prevRank: before };
             });
         }, 1800);
         const cycle = setInterval(() => setModeIdx((i) => (i + 1) % MODES.length), 5000);
         return () => { clearInterval(tick); clearInterval(cycle); };
     }, [live, rand]);
 
+    const { rows, prevRank } = board;
     const sorted = [...rows].sort((a, b) => b.change - a.change).slice(0, compact ? 3 : 10);
     const max = sorted[0]?.change || 1;
 
