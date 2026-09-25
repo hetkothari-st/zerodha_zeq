@@ -51,7 +51,7 @@ test('shows the server message when approval is refused', async () => {
 test('switching tab loads that status', async () => {
     render(<AdminPage />);
     await screen.findByText('Asha');
-    await userEvent.click(screen.getByRole('tab', { name: 'Approved' }));
+    await userEvent.click(screen.getByRole('tab', { name: /^Approved/ }));
     await waitFor(() => expect(auth.apiFetch).toHaveBeenCalledWith('/api/admin/users?status=approved'));
 });
 
@@ -92,7 +92,7 @@ test('a stale pending response does not overwrite the Approved tab after switchi
     });
     render(<AdminPage />);
     await waitFor(() => expect(auth.apiFetch).toHaveBeenCalledWith('/api/admin/users?status=pending'));
-    await userEvent.click(screen.getByRole('tab', { name: 'Approved' }));
+    await userEvent.click(screen.getByRole('tab', { name: /^Approved/ }));
     expect(await screen.findByText('Bina')).toBeInTheDocument();
     // Resolve the stale pending request now that Approved is showing; it must not clobber the view.
     resolvePending({ ok: true, status: 200, data: { users: [pendingUser] } });
@@ -131,4 +131,38 @@ test('Zerodha: two quick clicks on Connect Zerodha only call login-url once', as
     await waitFor(() => expect(go).toHaveBeenCalledTimes(1));
     const loginCalls = auth.apiFetch.mock.calls.filter(([path]) => path === '/api/admin/kite/login-url');
     expect(loginCalls.length).toBe(1);
+});
+
+test('tabs show a count per status and the table scrolls horizontally', async () => {
+    const approvedUser = { ...pendingUser, id: '33333333-3333-4333-8333-333333333333', full_name: 'Bina' };
+    auth.apiFetch = makeApi({
+        'GET /api/admin/users?status=pending': { ok: true, status: 200, data: { users: [pendingUser] } },
+        'GET /api/admin/users?status=approved': { ok: true, status: 200, data: { users: [approvedUser, { ...approvedUser, id: 'x' }] } },
+        'GET /api/admin/users?status=rejected': { ok: true, status: 200, data: { users: [] } },
+    });
+    const { container } = render(<AdminPage />);
+    expect(await screen.findByRole('tab', { name: 'Pending (1)' })).toBeInTheDocument();
+    expect(await screen.findByRole('tab', { name: 'Approved (2)' })).toBeInTheDocument();
+    expect(await screen.findByRole('tab', { name: 'Rejected (0)' })).toBeInTheDocument();
+    await screen.findByText('Asha');
+    expect(container.querySelector('table').parentElement).toHaveClass('overflow-x-auto');
+});
+
+test('counts refresh after an approval', async () => {
+    let pending = [pendingUser];
+    const approved = [];
+    auth.apiFetch = vi.fn(async (path, opts = {}) => {
+        const key = `${opts.method || 'GET'} ${path}`;
+        if (key === 'GET /api/admin/users?status=pending') return { ok: true, status: 200, data: { users: pending } };
+        if (key === 'GET /api/admin/users?status=approved') return { ok: true, status: 200, data: { users: approved } };
+        if (key === 'GET /api/admin/users?status=rejected') return { ok: true, status: 200, data: { users: [] } };
+        if (key === `POST /api/admin/users/${pendingUser.id}/approve`) { pending = []; approved.push(pendingUser); return { ok: true, status: 200, data: { ok: true } }; }
+        if (key === 'GET /api/kite-config') return { ok: true, status: 200, data: { configured: false } };
+        return { ok: true, status: 200, data: { ok: true } };
+    });
+    render(<AdminPage />);
+    expect(await screen.findByRole('tab', { name: 'Pending (1)' })).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole('button', { name: 'Approve Asha' }));
+    expect(await screen.findByRole('tab', { name: 'Pending (0)' })).toBeInTheDocument();
+    expect(await screen.findByRole('tab', { name: 'Approved (1)' })).toBeInTheDocument();
 });
