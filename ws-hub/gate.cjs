@@ -2,11 +2,23 @@
 
 const CLOSE_CODES = { unauthenticated: 4401, not_approved: 4403, signed_in_elsewhere: 4409, unavailable: 1013 };
 
+function normalizeOrigin(origin) {
+    if (typeof origin !== 'string') return '';
+    return origin.trim().replace(/\/+$/, '').toLowerCase();
+}
+
 function createGate({ hubAuth, allowedOrigins }) {
+    const normalizedAllowed = new Set(allowedOrigins.map(normalizeOrigin));
+
     async function admit(req) {
         const origin = req.headers.origin;
-        if (typeof origin !== 'string' || !allowedOrigins.includes(origin)) return { ok: false, http: 403 };
-        const token = new URL(req.url, 'http://hub.local').searchParams.get('token');
+        if (typeof origin !== 'string' || !normalizedAllowed.has(normalizeOrigin(origin))) return { ok: false, http: 403 };
+        let token;
+        try {
+            token = new URL(req.url, 'http://hub.local').searchParams.get('token');
+        } catch {
+            return { ok: false, reason: 'unauthenticated' };
+        }
         if (!token) return { ok: false, reason: 'unauthenticated' };
         return hubAuth.authenticate(token);
     }

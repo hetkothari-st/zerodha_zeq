@@ -4,7 +4,7 @@ const { createRemoteJWKSet, jwtVerify, decodeJwt } = require('jose');
 
 // Verifies Supabase tokens from any configured product project and checks
 // approval + current session against that project's profiles table.
-function createHubAuth({ projects, ttlMs = 15000, now = Date.now, fetchImpl = fetch }) {
+function createHubAuth({ projects, ttlMs = 15000, now = Date.now, fetchImpl = fetch, fetchTimeoutMs = 5000 }) {
     const byIssuer = new Map(projects.map((p) => {
         const url = p.url.replace(/\/$/, '');
         const issuer = `${url}/auth/v1`;
@@ -20,7 +20,7 @@ function createHubAuth({ projects, ttlMs = 15000, now = Date.now, fetchImpl = fe
         if (hit && now() - hit.at < ttlMs) return hit.profile;
         const res = await fetchImpl(
             `${project.url}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}&select=id,status,current_session_id`,
-            { headers: { apikey: project.serviceKey, Authorization: `Bearer ${project.serviceKey}` } },
+            { headers: { apikey: project.serviceKey, Authorization: `Bearer ${project.serviceKey}` }, signal: AbortSignal.timeout(fetchTimeoutMs) },
         );
         if (!res.ok) throw new Error(`profile lookup failed: ${res.status}`);
         const profile = (await res.json())[0] || null;

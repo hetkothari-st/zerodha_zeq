@@ -36,8 +36,10 @@ const HUB_SHARED_SECRET = process.env.HUB_SHARED_SECRET || '';
 const ALLOWED_ORIGINS = (process.env.HUB_ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean);
 let SUPABASE_PROJECTS = [];
 try { SUPABASE_PROJECTS = JSON.parse(process.env.SUPABASE_PROJECTS || '[]'); } catch {}
-if (!HUB_SHARED_SECRET || !ALLOWED_ORIGINS.length || !SUPABASE_PROJECTS.length) {
-    console.error('[hub] HUB_SHARED_SECRET, HUB_ALLOWED_ORIGINS and SUPABASE_PROJECTS are required');
+const PROJECTS_VALID = Array.isArray(SUPABASE_PROJECTS) && SUPABASE_PROJECTS.length > 0
+    && SUPABASE_PROJECTS.every((p) => p && typeof p.name === 'string' && typeof p.url === 'string' && typeof p.serviceKey === 'string');
+if (!HUB_SHARED_SECRET || !ALLOWED_ORIGINS.length || !PROJECTS_VALID) {
+    console.error('[hub] HUB_SHARED_SECRET, HUB_ALLOWED_ORIGINS and SUPABASE_PROJECTS (a non-empty array of { name, url, serviceKey } strings) are required');
     process.exit(1);
 }
 const gate = createGate({ hubAuth: createHubAuth({ projects: SUPABASE_PROJECTS }), allowedOrigins: ALLOWED_ORIGINS });
@@ -201,11 +203,25 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocketServer({ noServer: true });
 
 server.on('upgrade', async (req, socket, head) => {
-    const result = await gate.admit(req);
+    const onSocketError = () => socket.destroy();
+    socket.on('error', onSocketError);
+
+    let result;
+    try {
+        result = await gate.admit(req);
+    } catch (e) {
+        socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+        return socket.destroy();
+    }
+
+    if (socket.destroyed) return;
+
     if (result.http === 403) {
         socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
         return socket.destroy();
     }
+
+    socket.removeListener('error', onSocketError);
     wss.handleUpgrade(req, socket, head, (clientWs) => {
         if (!result.ok) return clientWs.close(CLOSE_CODES[result.reason], result.reason);
         clients.set(clientWs, result.identity);
@@ -222,7 +238,14 @@ server.on('upgrade', async (req, socket, head) => {
     });
 });
 
-setInterval(() => { gate.recheck(clients).catch((e) => console.error('[hub] recheck failed:', e.message)); }, 15000);
+let rechecking = false;
+setInterval(() => {
+    if (rechecking) return;
+    rechecking = true;
+    gate.recheck(clients)
+        .catch((e) => console.error('[hub] recheck failed:', e.message))
+        .finally(() => { rechecking = false; });
+}, 15000);
 
 // ── Start ─────────────────────────────────────────────────────────────
 server.listen(HUB_PORT, () => console.log(`[hub] Listening on :${HUB_PORT} (HTTP + WS, auth required)`));

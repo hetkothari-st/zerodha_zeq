@@ -69,3 +69,19 @@ test('recheck keeps clients when unavailable (Supabase down)', async () => {
     assert.equal(ws.closed, null);
     assert.equal(clients.size, 1);
 });
+
+test('admit: malformed request URL does not reject the promise', async () => {
+    const { gate, op } = await setup();
+    const result = await gate.admit({ headers: { origin: 'https://funnelop.in' }, url: 'http://[' });
+    assert.deepEqual(result, { ok: false, reason: 'unauthenticated' });
+});
+
+test('admit: allowed origin matches case- and trailing-slash-insensitively', async () => {
+    const op = await makeProject('op', 'https://op-test.supabase.co');
+    const rest = fakeRest();
+    const hubAuth = createHubAuth({ projects: [op.project], fetchImpl: rest.fetchImpl, now: () => 0 });
+    const gate = createGate({ hubAuth, allowedOrigins: ['https://FunnelOp.in/'] });
+    rest.set(op.project.url, 'u1', { status: 'approved', current_session_id: 's1' });
+    const r = await gate.admit(req('https://funnelop.in', await op.sign()));
+    assert.equal(r.ok, true);
+});

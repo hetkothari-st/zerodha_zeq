@@ -69,3 +69,13 @@ test('pending user whose session is NOT current → not_approved (status checked
     const result = await hubAuth.authenticate(await op.sign({ sessionId: 's2' }));
     assert.deepEqual(result, { ok: false, reason: 'not_approved' });
 });
+
+test('profile fetch that hangs times out → unavailable', async () => {
+    const op = await makeProject('op', 'https://op-test.supabase.co');
+    const hangingFetch = (url, init) => new Promise((_resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(new Error('aborted')));
+    });
+    const hubAuth = createHubAuth({ projects: [op.project], fetchImpl: hangingFetch, fetchTimeoutMs: 50 });
+    const result = await hubAuth.authenticate(await op.sign());
+    assert.deepEqual(result, { ok: false, reason: 'unavailable' });
+});
