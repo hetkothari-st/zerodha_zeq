@@ -14,7 +14,7 @@ export const theme = {
     Wordmark,
     classes: {
         page: "min-h-screen flex flex-col min-[900px]:flex-row bg-[#f7f6f2] text-gray-900 font-['Inter',sans-serif]",
-        panel: 'relative h-40 shrink-0 overflow-hidden border-b border-[#ecebe6] min-[900px]:h-auto min-[900px]:flex-[1.3] min-[900px]:border-b-0 min-[900px]:border-r',
+        panel: 'relative h-44 shrink-0 overflow-hidden border-b border-[#ecebe6] min-[900px]:h-auto min-[900px]:flex-[1.3] min-[900px]:border-b-0 min-[900px]:border-r',
         formSide: 'flex flex-1 items-center justify-center bg-white px-4 py-10',
         title: "text-2xl font-extrabold tracking-tight font-['Sora',sans-serif] text-gray-900",
         subtitle: 'text-sm text-gray-500',

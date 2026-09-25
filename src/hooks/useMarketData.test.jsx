@@ -244,3 +244,85 @@ describe('useMarketData — reconnect backoff', () => {
         expect(FakeWebSocket.instances).toHaveLength(4);
     });
 });
+
+// ── Hub auth + close-code handling (shared by both products) ─────────────
+function renderWithAuth(initialProps) {
+    return renderHook(
+        ({ enabled = true, accessToken, onSignedInElsewhere }) => useMarketData(enabled, null, null, { accessToken, onSignedInElsewhere }),
+        { initialProps },
+    );
+}
+const isClosedOrClosing = (sock) => sock.readyState === FakeWebSocket.CLOSING || sock.readyState === FakeWebSocket.CLOSED;
+
+describe('useMarketData — hub auth and close codes', () => {
+    test('the socket URL carries the encoded access token', () => {
+        renderWithAuth({ accessToken: 'a b/c+d=' });
+        expect(FakeWebSocket.instances).toHaveLength(1);
+        expect(FakeWebSocket.instances[0].url).toContain(`?token=${encodeURIComponent('a b/c+d=')}`);
+    });
+
+    test('close 4409 → onSignedInElsewhere, and no new socket after 120 s', () => {
+        const onSignedInElsewhere = vi.fn();
+        renderWithAuth({ accessToken: 'tok', onSignedInElsewhere });
+        act(() => { FakeWebSocket.instances[0].triggerOpen(); });
+        act(() => { FakeWebSocket.instances[0].triggerClose(4409); });
+        expect(onSignedInElsewhere).toHaveBeenCalledTimes(1);
+        act(() => { vi.advanceTimersByTime(120000); });
+        expect(FakeWebSocket.instances).toHaveLength(1);
+    });
+
+    test('a {type:"signed_in_elsewhere"} text message → onSignedInElsewhere', () => {
+        const onSignedInElsewhere = vi.fn();
+        renderWithAuth({ accessToken: 'tok', onSignedInElsewhere });
+        act(() => { FakeWebSocket.instances[0].triggerOpen(); });
+        act(() => { FakeWebSocket.instances[0].triggerMessage(JSON.stringify({ type: 'signed_in_elsewhere' })); });
+        expect(onSignedInElsewhere).toHaveBeenCalledTimes(1);
+    });
+
+    test('close 4403 → status error and no reconnect', () => {
+        const { result } = renderWithAuth({ accessToken: 'tok' });
+        act(() => { FakeWebSocket.instances[0].triggerOpen(); });
+        act(() => { FakeWebSocket.instances[0].triggerClose(4403); });
+        expect(result.current.status).toBe('error');
+        act(() => { vi.advanceTimersByTime(120000); });
+        expect(FakeWebSocket.instances).toHaveLength(1);
+        expect(result.current.status).toBe('error');
+    });
+
+    test('losing the token closes the socket and does not reconnect', () => {
+        const { rerender, result } = renderWithAuth({ accessToken: 'tok' });
+        act(() => { FakeWebSocket.instances[0].triggerOpen(); });
+        act(() => { rerender({ accessToken: null }); });
+        expect(isClosedOrClosing(FakeWebSocket.instances[0])).toBe(true);
+        expect(result.current.status).toBe('disconnected');
+        act(() => { vi.advanceTimersByTime(120000); });
+        expect(FakeWebSocket.instances).toHaveLength(1);
+    });
+});
+
+describe('useMarketData — production hub URL warning', () => {
+    afterEach(() => { vi.unstubAllEnvs(); });
+    const hubWarnings = (spy) => spy.mock.calls.filter(([m]) => typeof m === 'string' && m.startsWith('[KiteWS] VITE_WS_HUB_URL not set'));
+
+    test('no warning when VITE_WS_HUB_URL is set', () => {
+        vi.stubEnv('PROD', true);
+        vi.stubEnv('VITE_WS_HUB_URL', 'wss://hub.example');
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        renderWithAuth({ accessToken: 'tok' });
+        expect(FakeWebSocket.instances[0].url).toContain('wss://hub.example');
+        expect(hubWarnings(warn)).toHaveLength(0);
+    });
+
+    test('in production without VITE_WS_HUB_URL it warns once about the blocked fallback', () => {
+        vi.stubEnv('PROD', true);
+        vi.stubEnv('VITE_WS_HUB_URL', '');
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const { rerender } = renderWithAuth({ accessToken: 'tok' });
+        act(() => { rerender({ enabled: false, accessToken: 'tok' }); });
+        act(() => { rerender({ enabled: true, accessToken: 'tok' }); });
+        expect(FakeWebSocket.instances).toHaveLength(2);
+        const w = hubWarnings(warn);
+        expect(w).toHaveLength(1);
+        expect(w[0][0]).toBe(`[KiteWS] VITE_WS_HUB_URL not set — falling back to ws://${window.location.hostname}:8765, which is blocked in production`);
+    });
+});
