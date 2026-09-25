@@ -4,9 +4,11 @@
   "description": "Zerodha WebSocket hub — single Kite connection, broadcast to N clients",
   "main": "index.cjs",
   "scripts": {
-    "start": "node index.cjs"
+    "start": "node index.cjs",
+    "test": "node --test \"test/*.test.cjs\""
   },
   "dependencies": {
+    "jose": "^5.10.0",
     "ws": "^8.18.0"
   },
   "engines": {
