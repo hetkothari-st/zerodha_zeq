@@ -1,15 +1,16 @@
-import React from 'react'
-import ReactDOM from 'react-dom/client'
-import App from './App.jsx'
-import { AuthProvider } from './auth/AuthContext.jsx'
-import { installUserStorageShim } from './auth/userStorage.js'
-import './index.css'
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App.jsx';
+import Root from './Root.jsx';
+import { AuthProvider } from './auth/AuthProvider';
+import { installUserStorageShim } from './auth/userStorage';
+import './index.css';
 
-// Install the localStorage per-user namespace shim BEFORE any React code runs.
+// Per-user localStorage namespace must be active before any component reads settings.
 installUserStorageShim();
 
 ReactDOM.createRoot(document.getElementById('root')).render(
     <AuthProvider>
-        <App />
+        <Root App={App} />
     </AuthProvider>
-)
+);

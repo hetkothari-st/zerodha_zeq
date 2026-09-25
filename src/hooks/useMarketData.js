@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { ZERODHA_CONFIG } from '../config/zerodha';
 import instrumentMap from '../instrument_map.json';
+import { hubUrlWithToken, reconnectPolicy, nextRetryDelay } from '../lib/hubUrl';
 
 // ─────────────────────────────────────────────────────────────────────
 // Zerodha KiteTicker WebSocket — Binary Market Data
@@ -142,8 +143,7 @@ function exchangeTokenToInstrumentToken(exchangeToken, exchange = 'NFO') {
 
 // ── Hook ──────────────────────────────────────────────────────────────
 
-// Signature kept identical to old hook (4th wsCredential param is unused)
-export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = null, _wsCredential = null) => {
+export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = null, { accessToken = null, onSignedInElsewhere = null } = {}) => {
     const [status, setStatus] = useState('disconnected');
     const [depthData, setDepthData] = useState({});
 
@@ -155,6 +155,9 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
     const isReady = useRef(false);
     const pendingSubs = useRef([]);
     const authFailed = useRef(false);
+    const authRef = useRef({ accessToken, onSignedInElsewhere });
+    authRef.current = { accessToken, onSignedInElsewhere };
+    const retryAttempt = useRef(0);
 
     // instrument_token → exchange_token (string)
     const tokenMap = useRef(new Map());
@@ -229,16 +232,10 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
         // Connect to ws-hub on same hostname (port 8765) by default.
         // Hub holds the single Zerodha connection and relays to all clients.
         // VITE_WS_HUB_URL can override (e.g. different host/port).
-        const hubUrl = import.meta.env.VITE_WS_HUB_URL || `ws://${window.location.hostname}:8765`;
-
-        if (!hubUrl) {
-            const { API_KEY, ACCESS_TOKEN } = ZERODHA_CONFIG;
-            if (!API_KEY || !ACCESS_TOKEN) {
-                console.error('[KiteWS] Missing API_KEY or ACCESS_TOKEN and no hub available');
-                setStatus('error');
-                return;
-            }
-        }
+        const hubBase = import.meta.env.VITE_WS_HUB_URL || `ws://${window.location.hostname}:8765`;
+        const token = authRef.current.accessToken;
+        if (!token) { setStatus('disconnected'); return; }
+        const url = hubUrlWithToken(hubBase, token);
 
         if (ws.current) {
             ws.current.onclose = null;
@@ -247,8 +244,6 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
 
         loadInstrumentMap();
 
-        const { API_KEY, ACCESS_TOKEN, WS_URL } = ZERODHA_CONFIG;
-        const url = hubUrl || `${WS_URL}?api_key=${API_KEY}&access_token=${ACCESS_TOKEN}`;
         console.log('[KiteWS] Connecting...');
         setStatus('connecting');
 
@@ -259,6 +254,7 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
             console.log('[KiteWS] Connected');
             setStatus('connected');
             isReady.current = true;
+            retryAttempt.current = 0;
 
             const allTokens = [
                 ...Array.from(activeSubscriptions.current.values()),
@@ -297,6 +293,10 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
                     if (!text || !text.startsWith('{')) return;
                     try {
                         const msg = JSON.parse(text);
+                        if (msg.type === 'signed_in_elsewhere') {
+                            authRef.current.onSignedInElsewhere?.();
+                            return;
+                        }
                         if (msg.type === 'auth_error') {
                             // Stay on the page: redirecting to /kite/login lands users on Kite's
                             // raw JSON error when the API key has expired. status 'error' shows
@@ -361,9 +361,14 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
 
             if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current);
 
+            const policy = reconnectPolicy(event.code);
+            if (policy === 'displaced') { authRef.current.onSignedInElsewhere?.(); return; }
+            if (policy === 'stop') { setStatus('error'); return; }
             if (enabledRef.current) {
-                console.warn('[KiteWS] Reconnecting in 3s...');
-                reconnectTimeout.current = setTimeout(connect, 3000);
+                const delay = nextRetryDelay(retryAttempt.current);
+                retryAttempt.current += 1;
+                console.warn(`[KiteWS] Reconnecting in ${delay}ms...`);
+                reconnectTimeout.current = setTimeout(connect, delay);
             }
         };
 
@@ -374,6 +379,12 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
         };
 
     }, [loadInstrumentMap, resolveInstrumentToken, resolveAppToken]);
+
+    // A first token arriving after sign-in (or a token change) should trigger a
+    // connect when enabled and currently disconnected.
+    useEffect(() => {
+        if (enabled && accessToken && (!ws.current || ws.current.readyState === WebSocket.CLOSED)) connect();
+    }, [enabled, Boolean(accessToken)]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // ── Watchdog: resubscribe stale tokens ────────────────────────────
     useEffect(() => {
