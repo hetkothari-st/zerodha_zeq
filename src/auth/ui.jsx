@@ -79,5 +79,5 @@ export function Notice({ kind = 'error', children }) {
 }
 
 export function Legal() {
-    return <p className={`${c.muted} text-center`}>Analytics tool, not investment advice.</p>;
+    return <p className={`${c.muted} text-center`}>Market panel is illustrative, not live data. Analytics tool, not investment advice.</p>;
 }

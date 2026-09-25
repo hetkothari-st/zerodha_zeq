@@ -28,7 +28,7 @@ export default function ForgotPassword({ onBack }) {
         <form onSubmit={onSubmit} className="flex flex-col gap-4" noValidate>
             <Title title="Reset your password" subtitle="We'll email you a link to set a new one." />
             {sent ? (
-                <Notice kind="info">If an account exists for {email.trim()}, a reset link is on its way.</Notice>
+                <Notice kind="info">If an account exists for {email.trim()}, a reset link is on its way. Open it on this device.</Notice>
             ) : (
                 <>
                     <Field id="forgot-email" label="Email" type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} />

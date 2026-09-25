@@ -22,6 +22,7 @@ beforeEach(() => {
 });
 
 const { default: AuthScreens } = await import('./AuthScreens');
+const { default: AuthLayout } = await import('./AuthLayout');
 
 test('view resets to signIn when the screen changes', async () => {
     const { rerender } = render(<AuthScreens />);
@@ -35,4 +36,11 @@ test('view resets to signIn when the screen changes', async () => {
     auth = { ...auth, screen: 'signIn' };
     rerender(<AuthScreens />);
     expect(screen.getByRole('heading', { name: 'Sign in' })).toBeInTheDocument();
+});
+
+test('the decorative market panel is inert and hidden from assistive tech', () => {
+    const { container } = render(<AuthLayout><p>form</p></AuthLayout>);
+    const aside = container.querySelector('aside');
+    expect(aside).toHaveAttribute('aria-hidden', 'true');
+    expect(aside).toHaveAttribute('inert', '');
 });

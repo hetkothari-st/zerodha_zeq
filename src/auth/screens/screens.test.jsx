@@ -28,6 +28,9 @@ const { default: ResetPassword } = await import('./ResetPassword');
 const { default: Waitlist } = await import('./Waitlist');
 const { default: VerifyEmail } = await import('./VerifyEmail');
 const { default: AddEmail } = await import('./AddEmail');
+const { default: Unavailable, pageNav } = await import('./Unavailable');
+const { default: ForgotPassword } = await import('./ForgotPassword');
+const { default: LinkExpired } = await import('./LinkExpired');
 
 test('SignIn email: submits trimmed email and shows server error', async () => {
     auth.signInWithPassword = vi.fn(() => Promise.resolve({ error: 'Wrong email or password.', code: 'invalid_credentials' }));
@@ -219,4 +222,70 @@ test('SignIn: the inline resend button guards against double clicks', async () =
     await userEvent.click(resendBtn);
     await act(async () => { resolveResend({ error: null }); });
     expect(auth.resendSignupEmail).toHaveBeenCalledTimes(1);
+});
+
+test('SignIn and SignUp show the illustrative-data and not-advice line', () => {
+    const text = 'Market panel is illustrative, not live data. Analytics tool, not investment advice.';
+    const { unmount } = render(<SignIn onSwitch={() => {}} onForgot={() => {}} />);
+    expect(screen.getByText(text)).toBeInTheDocument();
+    unmount();
+    render(<SignUp onSwitch={() => {}} />);
+    expect(screen.getByText(text)).toBeInTheDocument();
+});
+
+test('ForgotPassword success tells the user to open the link on this device', async () => {
+    render(<ForgotPassword onBack={() => {}} />);
+    await userEvent.type(screen.getByLabelText('Email'), ' a@b.in ');
+    await userEvent.click(screen.getByRole('button', { name: 'Send reset link' }));
+    expect(auth.sendPasswordReset).toHaveBeenCalledWith('a@b.in');
+    expect(await screen.findByRole('status')).toHaveTextContent('If an account exists for a@b.in, a reset link is on its way. Open it on this device.');
+});
+
+test('LinkExpired: without a session the button goes back to sign in', async () => {
+    auth.session = null;
+    render(<LinkExpired />);
+    await userEvent.click(screen.getByRole('button', { name: 'Back to sign in' }));
+    expect(auth.clearLinkError).toHaveBeenCalled();
+});
+
+test('LinkExpired: with a session the button reads Continue', async () => {
+    auth.session = { user: { id: 'u1' } };
+    render(<LinkExpired />);
+    expect(screen.queryByRole('button', { name: 'Back to sign in' })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(auth.clearLinkError).toHaveBeenCalled();
+});
+
+test('Unavailable with no session (startup failure): Try again reloads the page, no Sign out', async () => {
+    auth.session = null;
+    const reload = vi.spyOn(pageNav, 'reload').mockImplementation(() => {});
+    render(<Unavailable />);
+    expect(screen.queryByRole('button', { name: 'Sign out' })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(auth.refreshProfile).not.toHaveBeenCalled();
+});
+
+test('Unavailable after a failed claim: Try again calls retryClaim', async () => {
+    auth.session = { user: { id: 'u1' } };
+    auth.claimError = true;
+    auth.retryClaim = vi.fn(ok);
+    const reload = vi.spyOn(pageNav, 'reload').mockImplementation(() => {});
+    render(<Unavailable />);
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(auth.retryClaim).toHaveBeenCalledTimes(1);
+    expect(auth.refreshProfile).not.toHaveBeenCalled();
+    expect(reload).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    expect(auth.signOut).toHaveBeenCalled();
+});
+
+test('Unavailable after a profile error: Try again reloads the profile', async () => {
+    auth.session = { user: { id: 'u1' } };
+    auth.claimError = false;
+    auth.retryClaim = vi.fn(ok);
+    render(<Unavailable />);
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(auth.refreshProfile).toHaveBeenCalledTimes(1);
+    expect(auth.retryClaim).not.toHaveBeenCalled();
 });

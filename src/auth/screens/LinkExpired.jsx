@@ -7,7 +7,7 @@ export default function LinkExpired() {
     return (
         <div className="flex flex-col gap-4">
             <Title title="That link has expired" subtitle="Links work once and expire after a while. Sign in to get a new one." />
-            <PrimaryButton type="button" onClick={() => auth.clearLinkError()}>Back to sign in</PrimaryButton>
+            <PrimaryButton type="button" onClick={() => auth.clearLinkError()}>{auth.session ? 'Continue' : 'Back to sign in'}</PrimaryButton>
         </div>
     );
 }
