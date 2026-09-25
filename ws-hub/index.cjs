@@ -29,6 +29,18 @@ loadEnv();
 let API_KEY      = process.env.ZERODHA_API_KEY      || process.env.VITE_ZERODHA_API_KEY || '';
 let ACCESS_TOKEN = process.env.ZERODHA_ACCESS_TOKEN || process.env.VITE_ZERODHA_ACCESS_TOKEN || '';
 const HUB_PORT   = parseInt(process.env.PORT || process.env.HUB_PORT || '8765', 10);
+const { createHubAuth, hasHubSecret } = require('./auth.cjs');
+const { createGate, CLOSE_CODES } = require('./gate.cjs');
+
+const HUB_SHARED_SECRET = process.env.HUB_SHARED_SECRET || '';
+const ALLOWED_ORIGINS = (process.env.HUB_ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean);
+let SUPABASE_PROJECTS = [];
+try { SUPABASE_PROJECTS = JSON.parse(process.env.SUPABASE_PROJECTS || '[]'); } catch {}
+if (!HUB_SHARED_SECRET || !ALLOWED_ORIGINS.length || !SUPABASE_PROJECTS.length) {
+    console.error('[hub] HUB_SHARED_SECRET, HUB_ALLOWED_ORIGINS and SUPABASE_PROJECTS are required');
+    process.exit(1);
+}
+const gate = createGate({ hubAuth: createHubAuth({ projects: SUPABASE_PROJECTS }), allowedOrigins: ALLOWED_ORIGINS });
 
 function updateTokenInEnvFiles(newToken) {
     ACCESS_TOKEN = newToken;
@@ -47,7 +59,7 @@ function updateTokenInEnvFiles(newToken) {
 }
 
 // ── State ─────────────────────────────────────────────────────────────
-const clients        = new Set();
+const clients        = new Map();   // ws → identity
 const subscribedSet  = new Set();
 const fullModeSet    = new Set();
 let zerodha          = null;
@@ -56,7 +68,7 @@ let isAuthError      = false;
 
 // ── Broadcast ─────────────────────────────────────────────────────────
 function broadcast(data, isBinary) {
-    clients.forEach(c => {
+    clients.forEach((_identity, c) => {
         if (c.readyState === WebSocket.OPEN) {
             c.send(data, { binary: isBinary });
         }
@@ -151,19 +163,13 @@ function connectZerodha() {
 
 // ── HTTP Server (for Auth Flow updates) ───────────────────────────────
 const server = http.createServer((req, res) => {
-    // CORS headers for local access if needed
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'OPTIONS, POST, GET');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-    if (req.method === 'OPTIONS') {
-        res.writeHead(204);
-        return res.end();
-    }
-
     const parsedUrl = url.parse(req.url, true);
 
     if (parsedUrl.pathname === '/api/update-token' && req.method === 'POST') {
+        if (!hasHubSecret(req.headers['x-hub-secret'], HUB_SHARED_SECRET)) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ code: 'unauthenticated', message: 'Missing or invalid hub secret.' }));
+        }
         let body = '';
         req.on('data', chunk => body += chunk.toString());
         req.on('end', () => {
@@ -191,29 +197,35 @@ const server = http.createServer((req, res) => {
     res.end();
 });
 
-// ── WebSocket Server ──────────────────────────────────────────────────
-const wss = new WebSocketServer({ server });
+// ── WebSocket Server (authenticated upgrades only) ────────────────────
+const wss = new WebSocketServer({ noServer: true });
 
-wss.on('listening', () => {
-    console.log(`[hub] Listening on ws://localhost:${HUB_PORT} (HTTP + WS)`);
-});
-
-wss.on('connection', (clientWs, req) => {
-    clients.add(clientWs);
-    
-    if (isAuthError) {
-        clientWs.send(JSON.stringify({ type: 'auth_error', message: 'Token missing or expired' }));
-    } else if (zerodhaReady()) {
-        clientWs.send(JSON.stringify({ type: 'auth_success' }));
+server.on('upgrade', async (req, socket, head) => {
+    const result = await gate.admit(req);
+    if (result.http === 403) {
+        socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+        return socket.destroy();
     }
+    wss.handleUpgrade(req, socket, head, (clientWs) => {
+        if (!result.ok) return clientWs.close(CLOSE_CODES[result.reason], result.reason);
+        clients.set(clientWs, result.identity);
 
-    clientWs.on('message', handleClientMessage);
-    clientWs.on('close', () => clients.delete(clientWs));
-    clientWs.on('error', () => clients.delete(clientWs));
+        if (isAuthError) {
+            clientWs.send(JSON.stringify({ type: 'auth_error', message: 'Token missing or expired' }));
+        } else if (zerodhaReady()) {
+            clientWs.send(JSON.stringify({ type: 'auth_success' }));
+        }
+
+        clientWs.on('message', handleClientMessage);
+        clientWs.on('close', () => clients.delete(clientWs));
+        clientWs.on('error', () => clients.delete(clientWs));
+    });
 });
+
+setInterval(() => { gate.recheck(clients).catch((e) => console.error('[hub] recheck failed:', e.message)); }, 15000);
 
 // ── Start ─────────────────────────────────────────────────────────────
-server.listen(HUB_PORT);
+server.listen(HUB_PORT, () => console.log(`[hub] Listening on :${HUB_PORT} (HTTP + WS, auth required)`));
 connectZerodha();
 
 setInterval(() => {
