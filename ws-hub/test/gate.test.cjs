@@ -45,6 +45,21 @@ test('recheck: displaced client is told and closed with 4409', async () => {
     assert.equal(clients.size, 0);
 });
 
+test('recheck bypasses the profile cache: a session displaced 1 ms before the recheck is caught by that recheck', async () => {
+    const { gate, op, rest, tick } = await setup();
+    rest.set(op.project.url, 'u1', { status: 'approved', current_session_id: 's1' });
+    const { identity } = await gate.admit(req('https://funnelop.in', await op.sign()));
+    const ws = fakeSocket();
+    const clients = new Map([[ws, identity]]);
+    // Cache entries are stamped after the fetch, so at the next 15 s tick the entry is still just inside its TTL.
+    tick(14998);
+    rest.set(op.project.url, 'u1', { status: 'approved', current_session_id: 's2' });
+    tick(1);
+    await gate.recheck(clients);
+    assert.deepEqual(ws.closed, { code: CLOSE_CODES.signed_in_elsewhere, reason: 'signed_in_elsewhere' });
+    assert.equal(clients.size, 0);
+});
+
 test('recheck: rejected user closed with 4403', async () => {
     const { gate, op, rest, tick } = await setup();
     rest.set(op.project.url, 'u1', { status: 'approved', current_session_id: 's1' });

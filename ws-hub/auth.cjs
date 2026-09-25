@@ -2,6 +2,22 @@
 const crypto = require('crypto');
 const { createRemoteJWKSet, jwtVerify, decodeJwt } = require('jose');
 
+// jose codes that mean "this token is not acceptable". Anything else thrown while
+// verifying (JWKS timeout, network errors, JWKS HTTP failures) is an infrastructure
+// problem → 'unavailable', so a Supabase Auth outage never kicks anyone.
+const BAD_TOKEN_CODES = new Set([
+    'ERR_JWKS_NO_MATCHING_KEY',
+    'ERR_JWKS_INVALID',
+    'ERR_JWKS_MULTIPLE_MATCHING_KEYS',
+    'ERR_JOSE_ALG_NOT_ALLOWED',
+    'ERR_JOSE_NOT_SUPPORTED',
+]);
+
+function isBadTokenError(err) {
+    const code = err && typeof err.code === 'string' ? err.code : '';
+    return code.startsWith('ERR_JWT_') || code.startsWith('ERR_JWS_') || code.startsWith('ERR_JWK_') || BAD_TOKEN_CODES.has(code);
+}
+
 // Verifies Supabase tokens from any configured product project and checks
 // approval + current session against that project's profiles table.
 function createHubAuth({ projects, ttlMs = 15000, now = Date.now, fetchImpl = fetch, fetchTimeoutMs = 5000 }) {
@@ -59,14 +75,16 @@ function createHubAuth({ projects, ttlMs = 15000, now = Date.now, fetchImpl = fe
         let payload;
         try {
             ({ payload } = await jwtVerify(token, project.keySet, { issuer: project.issuer, audience: 'authenticated' }));
-        } catch {
-            return { ok: false, reason: 'unauthenticated' };
+        } catch (err) {
+            return { ok: false, reason: isBadTokenError(err) ? 'unauthenticated' : 'unavailable' };
         }
         if (!payload.sub || !payload.session_id) return { ok: false, reason: 'unauthenticated' };
         return check({ issuer: project.issuer, project: project.name, userId: payload.sub, sessionId: payload.session_id });
     }
 
-    return { authenticate, check: (identity) => check(identity) };
+    // `fresh: true` bypasses the profile cache (periodic rechecks must see displacements
+    // immediately); connection-time admits use the cache.
+    return { authenticate, check: (identity, { fresh = false } = {}) => check(identity, fresh) };
 }
 
 function hasHubSecret(headerValue, secret) {

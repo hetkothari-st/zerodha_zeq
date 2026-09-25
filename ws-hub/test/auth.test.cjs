@@ -1,6 +1,7 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { errors: joseErrors } = require('jose');
 const { createHubAuth, hasHubSecret } = require('../auth.cjs');
 const { makeProject, fakeRest } = require('./helpers.cjs');
 
@@ -78,4 +79,43 @@ test('profile fetch that hangs times out → unavailable', async () => {
     const hubAuth = createHubAuth({ projects: [op.project], fetchImpl: hangingFetch, fetchTimeoutMs: 50 });
     const result = await hubAuth.authenticate(await op.sign());
     assert.deepEqual(result, { ok: false, reason: 'unavailable' });
+});
+
+test('connection-time authenticate within the TTL is served from cache', async () => {
+    const { op, rest, hubAuth, tick } = await setup();
+    rest.set(op.project.url, 'u1', { status: 'approved', current_session_id: 's1' });
+    assert.equal((await hubAuth.authenticate(await op.sign())).ok, true);
+    const fetches = rest.calls.length;
+    tick(14999);
+    assert.equal((await hubAuth.authenticate(await op.sign())).ok, true);
+    assert.equal(rest.calls.length, fetches);
+});
+
+test('check(identity, { fresh: true }) bypasses the cache', async () => {
+    const { op, rest, hubAuth } = await setup();
+    rest.set(op.project.url, 'u1', { status: 'approved', current_session_id: 's1' });
+    const { identity } = await hubAuth.authenticate(await op.sign());
+    const fetches = rest.calls.length;
+    assert.equal((await hubAuth.check(identity)).ok, true);
+    assert.equal(rest.calls.length, fetches, 'plain check uses the cache');
+    rest.set(op.project.url, 'u1', { status: 'approved', current_session_id: 's2' });
+    assert.deepEqual(await hubAuth.check(identity, { fresh: true }), { ok: false, reason: 'signed_in_elsewhere' });
+    assert.equal(rest.calls.length, fetches + 1);
+});
+
+test('JWKS network failure → unavailable, not unauthenticated', async () => {
+    const op = await makeProject('op', 'https://op-test.supabase.co');
+    const rest = fakeRest();
+    rest.set(op.project.url, 'u1', { status: 'approved', current_session_id: 's1' });
+    const down = { ...op.project, jwks: async () => { throw new TypeError('fetch failed'); } };
+    const hubAuth = createHubAuth({ projects: [down], fetchImpl: rest.fetchImpl });
+    assert.deepEqual(await hubAuth.authenticate(await op.sign()), { ok: false, reason: 'unavailable' });
+    const timeout = createHubAuth({ projects: [{ ...op.project, jwks: async () => { throw new joseErrors.JWKSTimeout(); } }], fetchImpl: rest.fetchImpl });
+    assert.deepEqual(await timeout.authenticate(await op.sign()), { ok: false, reason: 'unavailable' });
+});
+
+test('bad tokens stay unauthenticated when JWKS says no matching key', async () => {
+    const op = await makeProject('op', 'https://op-test.supabase.co');
+    const hubAuth = createHubAuth({ projects: [{ ...op.project, jwks: async () => { throw new joseErrors.JWKSNoMatchingKey(); } }], fetchImpl: fakeRest().fetchImpl });
+    assert.deepEqual(await hubAuth.authenticate(await op.sign()), { ok: false, reason: 'unauthenticated' });
 });

@@ -26,7 +26,7 @@ function createGate({ hubAuth, allowedOrigins }) {
     // Periodic re-validation of connected clients. Supabase outages never disconnect anyone.
     async function recheck(clients) {
         await Promise.all([...clients].map(async ([ws, identity]) => {
-            const result = await hubAuth.check(identity);
+            const result = await hubAuth.check(identity, { fresh: true });
             if (result.ok || result.reason === 'unavailable') return;
             if (result.reason === 'signed_in_elsewhere') {
                 try { ws.send(JSON.stringify({ type: 'signed_in_elsewhere' })); } catch {}
