@@ -8,13 +8,17 @@
         "dev:vite": "vite",
         "start": "node server/index.js",
         "build": "vite build",
-        "preview": "vite preview"
+        "preview": "vite preview",
+        "test": "node --test \"test/**/*.test.js\""
     },
     "dependencies": {
         "axios": "^1.6.0",
         "clsx": "^2.0.0",
         "express": "^4.19.2",
+        "express-rate-limit": "^7.5.1",
         "framer-motion": "^10.16.4",
+        "helmet": "^8.3.0",
+        "jose": "^5.10.0",
         "lucide-react": "^0.292.0",
         "react": "^18.2.0",
         "react-dom": "^18.2.0",
