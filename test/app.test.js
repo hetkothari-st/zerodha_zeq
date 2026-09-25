@@ -55,6 +55,7 @@ test('security headers: CSP with frame-ancestors none, no x-powered-by', async (
         const csp = res.headers.get('content-security-policy');
         assert.match(csp, /frame-ancestors 'none'/);
         assert.match(csp, /connect-src 'self' https:\/\/op\.supabase\.co wss:\/\/op\.supabase\.co wss:\/\/hub\.example/);
+        assert.match(csp, /img-src 'self' data: https:\/\/\*\.googleusercontent\.com/); // Google avatars on any lhN host
         assert.equal(res.headers.get('x-powered-by'), null);
     } finally { await srv.close(); }
 });

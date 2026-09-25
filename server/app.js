@@ -16,7 +16,7 @@ export function createApp({ config, distDir, routers }) {
                 scriptSrc: ["'self'"],
                 styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
                 fontSrc: ["'self'", 'https://fonts.gstatic.com'],
-                imgSrc: ["'self'", 'data:', 'https://lh3.googleusercontent.com'],
+                imgSrc: ["'self'", 'data:', 'https://*.googleusercontent.com'], // Google avatars are served from lh3/lh4/… hosts
                 connectSrc: ["'self'", config.supabaseUrl, config.supabaseUrl.replace(/^http/, 'ws'), ...(config.hubPublicUrl ? [config.hubPublicUrl] : [])],
                 frameAncestors: ["'none'"],
                 formAction: ["'self'"],
