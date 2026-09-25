@@ -1,9 +1,11 @@
 import { vi } from 'vitest';
 
 // Minimal stand-in for the supabase-js client surface AuthProvider uses.
-export function createFakeSupabase({ session = null, profile = null, profileError = null } = {}) {
+// `currentSessionId` is what a `select('current_session_id')` on profiles returns (the
+// account's claimed session); `sessionCheckError` makes that lookup fail.
+export function createFakeSupabase({ session = null, profile = null, profileError = null, currentSessionId = null, sessionCheckError = null } = {}) {
     let listener = null;
-    const state = { session, profile, profileError };
+    const state = { session, profile, profileError, currentSessionId, sessionCheckError };
     const ok = (data = {}) => Promise.resolve({ data, error: null });
     const client = {
         state,
@@ -24,9 +26,14 @@ export function createFakeSupabase({ session = null, profile = null, profileErro
         },
         rpc: vi.fn(() => ok()),
         from: vi.fn(() => {
+            let fields = null;
             const q = {
-                select: () => q, eq: () => q, update: vi.fn(() => q),
-                maybeSingle: () => Promise.resolve({ data: state.profile, error: state.profileError }),
+                select: (f) => { fields = f; return q; }, eq: () => q, update: vi.fn(() => q),
+                maybeSingle: () => (fields === 'current_session_id'
+                    ? Promise.resolve(state.sessionCheckError
+                        ? { data: null, error: state.sessionCheckError }
+                        : { data: { current_session_id: state.currentSessionId }, error: null })
+                    : Promise.resolve({ data: state.profile, error: state.profileError })),
                 then: (res, rej) => Promise.resolve({ data: null, error: null }).then(res, rej),
             };
             return q;

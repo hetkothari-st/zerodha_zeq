@@ -4,11 +4,18 @@ import { friendlyError } from './core/errors';
 import { sessionIdOf } from './core/validators';
 import { screenFor } from './core/screenFor';
 import { createApiFetch } from './core/apiFetch';
-import { setUserNamespace } from './userStorage';
+import { setUserNamespace, migrateToUserNamespace } from './userStorage';
 
 const AuthContext = createContext(null);
 const CLAIMED_KEY = 'funnel_claimed_session';
 const PROFILE_FIELDS = 'id,full_name,email,phone,status,role';
+const CLAIM_RETRY_MS = 1000;
+const SESSION_WATCH_MS = 15000;
+const MISSING_ENV_MESSAGE = '[auth] VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY not set';
+const NO_CLIENT_RESULT = { error: 'Sign-in is temporarily unavailable. Please try again in a moment.', code: 'startup_error' };
+let missingEnvLogged = false;
+
+const wait = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 function linkErrorFrom(paramString) {
     const params = new URLSearchParams(paramString);
@@ -40,13 +47,20 @@ export function AuthProvider({ children, client: clientProp }) {
     const [displaced, setDisplaced] = useState(false);
     const [claiming, setClaiming] = useState(false);
     const [startupError, setStartupError] = useState(false);
+    const [claimError, setClaimError] = useState(false);
     const sessionRef = useRef(null);
     const claimingRef = useRef(false);
     const origin = typeof window !== 'undefined' ? window.location.origin : '';
 
-    const adoptSession = useCallback((s) => { sessionRef.current = s; setSession(s); }, []);
+    const adoptSession = useCallback((s) => {
+        sessionRef.current = s;
+        setSession(s);
+        if (s) setStartupError(false); // a session arrived after all — the startup failure is over
+    }, []);
 
     // One device at a time: a new session claims the account and signs out the others.
+    // A failed claim is retried once; if that fails too, claimError puts up Unavailable
+    // (whose "Try again" calls retryClaim) rather than silently leaving two devices signed in.
     const claimIfNew = useCallback(async (s) => {
         if (!client) return;
         const sid = sessionIdOf(s?.access_token);
@@ -56,11 +70,22 @@ export function AuthProvider({ children, client: clientProp }) {
         if (claimed === sid) return;
         claimingRef.current = true;
         setClaiming(true);
+        setClaimError(false);
+        const claimOnce = async () => {
+            try { return !(await client.rpc('claim_session')).error; } catch { return false; }
+        };
         try {
-            const { error } = await client.rpc('claim_session');
-            if (error) return;
+            let ok = await claimOnce();
+            if (!ok) { await wait(CLAIM_RETRY_MS); ok = await claimOnce(); }
+            if (!ok) {
+                // Only flag it if we're still on that session (not signed out / replaced meanwhile).
+                if (sessionIdOf(sessionRef.current?.access_token) === sid) setClaimError(true);
+                return;
+            }
             try { localStorage.setItem(CLAIMED_KEY, sid); } catch {}
             await client.auth.signOut({ scope: 'others' });
+        } catch {
+            // signOut of the other devices failed; the claim itself stands.
         } finally {
             claimingRef.current = false;
             setClaiming(false);
@@ -78,7 +103,12 @@ export function AuthProvider({ children, client: clientProp }) {
     }, [client]);
 
     useEffect(() => {
-        if (!client) { setStartupError(true); setLoading(false); return; }
+        if (!client) {
+            if (!missingEnvLogged) { missingEnvLogged = true; console.error(MISSING_ENV_MESSAGE); }
+            setStartupError(true);
+            setLoading(false);
+            return;
+        }
         let active = true;
         // onAuthStateChange can fire (e.g. SIGNED_IN) before this initial snapshot resolves;
         // once that happens the event is the source of truth, so don't let a late, stale
@@ -101,7 +131,7 @@ export function AuthProvider({ children, client: clientProp }) {
             adoptSession(s);
             if (event === 'PASSWORD_RECOVERY') setRecovery(true);
             if ((event === 'SIGNED_IN' || event === 'PASSWORD_RECOVERY') && s) claimIfNew(s);
-            if (event === 'SIGNED_OUT') { setProfile(null); setDisplaced(false); setRecovery(false); }
+            if (event === 'SIGNED_OUT') { setProfile(null); setDisplaced(false); setRecovery(false); setClaimError(false); }
         });
         return () => { active = false; sub.subscription.unsubscribe(); };
     }, [client, claimIfNew, adoptSession]);
@@ -109,6 +139,7 @@ export function AuthProvider({ children, client: clientProp }) {
     const userId = session?.user?.id ?? null;
     const phoneVerified = Boolean(session?.user?.phone_confirmed_at);
     useEffect(() => {
+        if (userId) migrateToUserNamespace(userId, sessionRef.current?.user?.email ?? null);
         setUserNamespace(userId);
         if (userId) { setProfile(null); setProfileError(false); loadProfile(userId); }
         else { setProfile(null); setProfileError(false); }
@@ -168,6 +199,7 @@ export function AuthProvider({ children, client: clientProp }) {
             return result(error);
         },
         signOut: async () => {
+            if (!client) return NO_CLIENT_RESULT;
             const { error } = await client.auth.signOut({ scope: 'global' });
             if (!error) {
                 try { localStorage.removeItem(CLAIMED_KEY); } catch {}
@@ -176,6 +208,7 @@ export function AuthProvider({ children, client: clientProp }) {
             return result(error);
         },
         signOutHere: async () => {
+            if (!client) return NO_CLIENT_RESULT;
             const { error } = await client.auth.signOut({ scope: 'local' });
             if (!error) {
                 try { localStorage.removeItem(CLAIMED_KEY); } catch {}
@@ -188,16 +221,47 @@ export function AuthProvider({ children, client: clientProp }) {
             setLinkError(null);
             if (typeof window !== 'undefined') window.history.replaceState(null, '', window.location.pathname);
         },
-        markDisplaced: () => setDisplaced(true),
-    }), [client, origin, loadProfile, refreshSessionState]);
+        // Ignored mid-claim: the claim itself signs the old session out, which the hub may report.
+        markDisplaced: () => { if (!claimingRef.current) setDisplaced(true); },
+        retryClaim: async () => {
+            setClaimError(false);
+            const s = sessionRef.current;
+            if (s) await claimIfNew(s);
+        },
+    }), [client, origin, loadProfile, refreshSessionState, claimIfNew]);
+
+    const screen = claiming ? 'loading' : screenFor({ loading, recovery, linkError, session, profile, profileError, startupError, claimError });
+    const accessToken = session?.access_token ?? null;
+
+    // Displacement normally arrives over the hub WebSocket or an API 401. When the socket is
+    // off (market data disabled) neither fires, so while in the app we also check the
+    // account's claimed session every 15 s.
+    const watchSession = screen === 'app' && !displaced && Boolean(client) && Boolean(userId);
+    useEffect(() => {
+        if (!watchSession) return undefined;
+        const mySid = sessionIdOf(accessToken);
+        if (!mySid) return undefined;
+        let active = true;
+        const id = setInterval(async () => {
+            try {
+                const { data, error } = await client.from('profiles').select('current_session_id').eq('id', userId).maybeSingle();
+                if (!active || error) return;
+                const current = data?.current_session_id ?? null;
+                if (current && current !== mySid && !claimingRef.current) setDisplaced(true);
+            } catch {
+                // Network hiccup — try again on the next tick.
+            }
+        }, SESSION_WATCH_MS);
+        return () => { active = false; clearInterval(id); };
+    }, [watchSession, client, userId, accessToken]);
 
     const value = useMemo(() => ({
-        screen: claiming ? 'loading' : screenFor({ loading, recovery, linkError, session, profile, profileError, startupError }),
-        loading, session, user: session?.user ?? null, profile, profileError, recovery, linkError, displaced,
-        accessToken: session?.access_token ?? null,
+        screen,
+        loading, session, user: session?.user ?? null, profile, profileError, recovery, linkError, displaced, claimError,
+        accessToken,
         apiFetch,
         ...actions,
-    }), [loading, recovery, linkError, session, profile, profileError, displaced, claiming, startupError, apiFetch, actions]);
+    }), [screen, loading, recovery, linkError, session, profile, profileError, displaced, claimError, accessToken, apiFetch, actions]);
 
     return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

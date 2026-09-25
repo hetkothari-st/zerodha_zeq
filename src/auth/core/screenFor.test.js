@@ -20,6 +20,11 @@ test.each([
     ['pending', { session: s(user()), profile: { status: 'pending' } }, 'waitlist'],
     ['approved', { session: s(user()), profile: approved }, 'app'],
     ['no session, startup failed', { session: null, startupError: true }, 'unavailable'],
+    ['claim failed', { session: s(user()), profile: approved, claimError: true }, 'unavailable'],
+    ['claim failed but email still unverified', { session: s(user({ email_confirmed_at: null })), claimError: true }, 'verifyEmail'],
+    ['claim failed but no verified mobile', { session: s(user({ phone_confirmed_at: null })), claimError: true }, 'addMobile'],
+    ['claim failed beats a pending profile', { session: s(user()), profile: { status: 'pending' }, claimError: true }, 'unavailable'],
+    ['recovery still beats a claim failure', { recovery: true, session: s(user()), claimError: true }, 'resetPassword'],
 ])('%s', (_name, state, expected) => {
     expect(screenFor(state)).toBe(expected);
 });
