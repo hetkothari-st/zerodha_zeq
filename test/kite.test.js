@@ -8,6 +8,8 @@ import { fakeAuth, approvedUser, approvedAdmin } from './helpers/fakeAuth.js';
 import { listen } from './helpers/http.js';
 
 const config = { kiteApiKey: 'kitekey', kiteApiSecret: 'kitesecret' };
+const SECRET = 'hub-shared-secret';
+const STATE_FORMAT = /^[A-Za-z0-9_-]+\.\d+\.[A-Za-z0-9_-]+$/;
 
 // Fake network: Kite login page (HTML unless keyRejected) and token endpoint.
 function fakeKite({ keyRejected = false, exchangeOk = true } = {}) {
@@ -34,7 +36,7 @@ async function setup({ kite = fakeKite(), now } = {}) {
     const pushed = [];
     const hub = { pushToken: async (t) => { pushed.push(t); return true; } };
     const kiteSession = { accessToken: '' };
-    const stateStore = createStateStore(now ? { now } : {});
+    const stateStore = createStateStore({ secret: SECRET, ...(now ? { now } : {}) });
     const app = express();
     app.use(express.json());
     app.use(createKiteRouter({ config, auth, kiteSession, stateStore, hub, fetchImpl: kite.fetchImpl }));
@@ -78,13 +80,16 @@ test('exchange-token: admin only; Kite failure → 502 kite_error', async () => 
 });
 
 test('login-url: returns Kite URL carrying a state nonce', async () => {
-    const { srv, as } = await setup();
+    const { srv, as, kite } = await setup();
     try {
         const body = await (await fetch(`${srv.url}/api/admin/kite/login-url`, { method: 'POST', headers: as('admin') })).json();
         const url = new URL(body.url);
         assert.equal(url.origin + url.pathname, 'https://kite.zerodha.com/connect/login');
         assert.equal(url.searchParams.get('api_key'), 'kitekey');
-        assert.match(url.searchParams.get('redirect_params'), /^state=[0-9a-f]{48}$/);
+        const state = url.searchParams.get('redirect_params').slice('state='.length);
+        assert.match(url.searchParams.get('redirect_params'), /^state=/);
+        assert.match(state, STATE_FORMAT);
+        assert.ok(kite.calls[0].init.signal instanceof AbortSignal, 'pre-check fetch has a timeout signal');
     } finally { await srv.close(); }
 });
 
@@ -158,4 +163,54 @@ test('hub client sends the shared secret and reports failures without throwing',
 
     const down = createHubClient({ hubUrl: 'http://hub', secret: 's', fetchImpl: async () => { throw new Error('ECONNREFUSED'); } });
     assert.equal(await down.pushToken('tok'), false);
+});
+
+test('state store: requires a secret', () => {
+    assert.throws(() => createStateStore({}), /secret/);
+    assert.throws(() => createStateStore(), /secret/);
+});
+
+test('state store: signed, URL-safe state issued by one instance is accepted by another with the same secret', () => {
+    const op = createStateStore({ secret: SECRET });
+    const eq = createStateStore({ secret: SECRET });
+    const state = op.issue();
+    assert.match(state, STATE_FORMAT);
+    assert.equal(encodeURIComponent(state), state);
+    assert.equal(eq.consume(state), true);
+});
+
+test('state store: tampered state and different-secret state are rejected', () => {
+    const store = createStateStore({ secret: SECRET });
+    const state = store.issue();
+    const [nonce, exp, sig] = state.split('.');
+    const flip = (s) => (s[0] === 'A' ? 'B' : 'A') + s.slice(1);
+    assert.equal(store.consume(`${flip(nonce)}.${exp}.${sig}`), false);
+    assert.equal(store.consume(`${nonce}.${Number(exp) + 1000}.${sig}`), false);
+    assert.equal(store.consume(`${nonce}.${exp}.${flip(sig)}`), false);
+    assert.equal(store.consume(`${nonce}.${exp}.${sig.slice(0, -2)}`), false);
+    assert.equal(store.consume(`${nonce}.${exp}`), false);
+    assert.equal(store.consume(''), false);
+    assert.equal(store.consume('garbage'), false);
+    const other = createStateStore({ secret: 'another-secret' });
+    assert.equal(other.consume(state), false);
+    assert.equal(store.consume(state), true);
+});
+
+test('state store: replay on the same instance is rejected', () => {
+    const store = createStateStore({ secret: SECRET });
+    const state = store.issue();
+    assert.equal(store.consume(state), true);
+    assert.equal(store.consume(state), false);
+});
+
+test('state store: expiry is enforced', () => {
+    let t = 1_000_000;
+    const issuer = createStateStore({ secret: SECRET, ttlMs: 1000, now: () => t });
+    const consumer = createStateStore({ secret: SECRET, ttlMs: 1000, now: () => t });
+    const ok = issuer.issue();
+    const late = issuer.issue();
+    t += 1000;
+    assert.equal(consumer.consume(ok), true);
+    t += 1;
+    assert.equal(consumer.consume(late), false);
 });

@@ -1,7 +1,7 @@
 import { sendError } from './errors.js';
 
-// Wraps async middleware to catch unhandled errors and pass to Express error handler.
-const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+// Wraps async middleware/handlers so rejections reach the Express error handler.
+export const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 // Chains: requireUser = signed in + approved + current session.
 //         requireAdmin = requireUser + role admin.
@@ -26,7 +26,11 @@ export function createAuthMiddleware({ verify, profiles }) {
         if (!token) return sendError(res, 'unauthenticated');
         try {
             req.auth = await verify(token);
-        } catch {
+        } catch (err) {
+            if (err?.code === 'AUTH_UNAVAILABLE') {
+                console.error('[auth] token verification unavailable:', err.message);
+                return sendError(res, 'auth_unavailable');
+            }
             return sendError(res, 'unauthenticated');
         }
         const profile = await loadProfile(req, res);

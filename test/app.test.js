@@ -16,7 +16,7 @@ async function setup() {
     const { auth, profiles } = fakeAuth({ admin: approvedAdmin });
     const kiteSession = { accessToken: 'super-secret-kite-token' };
     const routers = [
-        createKiteRouter({ config, auth, kiteSession, stateStore: createStateStore(), hub: { pushToken: async () => true } }),
+        createKiteRouter({ config, auth, kiteSession, stateStore: createStateStore({ secret: 'test-secret' }), hub: { pushToken: async () => true } }),
         createAdminRouter({ auth, profiles, profileAdmin: { listByStatus: async () => [] }, notifier: {} }),
     ];
     return listen(createApp({ config, distDir, routers }));

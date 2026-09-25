@@ -15,10 +15,13 @@ export function createProfileStore({ fetchProfile, ttlMs = 15000, now = Date.now
     };
 }
 
-export function supabaseProfileFetcher({ supabaseUrl, serviceKey, fetchImpl = fetch }) {
+export function supabaseProfileFetcher({ supabaseUrl, serviceKey, fetchImpl = fetch, timeoutMs = 5000 }) {
     return async (userId) => {
         const url = `${supabaseUrl}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}&select=id,status,role,current_session_id`;
-        const res = await fetchImpl(url, { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } });
+        const res = await fetchImpl(url, {
+            headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+            signal: AbortSignal.timeout(timeoutMs),
+        });
         if (!res.ok) throw new Error(`profile lookup failed: ${res.status}`);
         const rows = await res.json();
         return rows[0] ?? null;

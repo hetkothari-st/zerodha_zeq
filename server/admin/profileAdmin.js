@@ -15,6 +15,10 @@ export function createProfileAdmin({ supabaseUrl, serviceKey, fetchImpl = fetch 
         listByStatus(status) {
             return call(`profiles?status=eq.${status}&select=${LIST_FIELDS}&order=created_at.desc`);
         },
+        async getById(id) {
+            const rows = await call(`profiles?id=eq.${id}&select=${LIST_FIELDS}`);
+            return rows?.[0] ?? null;
+        },
         async setStatus(id, status, adminId) {
             const patch = { status, approved_at: status === 'approved' ? new Date().toISOString() : null, approved_by: adminId };
             const rows = await call(`profiles?id=eq.${id}`, {

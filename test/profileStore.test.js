@@ -57,3 +57,14 @@ test('supabaseProfileFetcher returns null for no rows and throws on HTTP errors'
     const broken = supabaseProfileFetcher({ supabaseUrl: 'https://x', serviceKey: 's', fetchImpl: async () => new Response('no', { status: 500 }) });
     await assert.rejects(broken('u1'), /500/);
 });
+
+test('supabaseProfileFetcher times out a hung request', async () => {
+    let signal;
+    const fetchImpl = (url, init) => new Promise((resolve, reject) => {
+        signal = init.signal;
+        init.signal.addEventListener('abort', () => reject(init.signal.reason));
+    });
+    const hung = supabaseProfileFetcher({ supabaseUrl: 'https://x', serviceKey: 's', fetchImpl, timeoutMs: 50 });
+    await assert.rejects(hung('u1'));
+    assert.ok(signal.aborted);
+});

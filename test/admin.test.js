@@ -7,13 +7,17 @@ import { fakeAuth, approvedUser, approvedAdmin } from './helpers/fakeAuth.js';
 import { listen } from './helpers/http.js';
 
 const TARGET = '22222222-2222-4222-8222-222222222222';
+const NO_PHONE = '44444444-4444-4444-8444-444444444444';
+const SELF = '55555555-5555-4555-8555-555555555555';
 const pendingRow = { id: TARGET, full_name: 'Asha', email: 'asha@example.com', phone: '+919876543210', status: 'pending' };
+const noPhoneRow = { id: NO_PHONE, full_name: 'Ravi', email: 'ravi@example.com', phone: null, status: 'pending' };
 
 function fakeProfileAdmin({ rows = [pendingRow], auditFails = false } = {}) {
     const log = { setStatus: [], audit: [] };
     return {
         log,
         listByStatus: async (status) => rows.filter((r) => r.status === status),
+        getById: async (id) => rows.find((r) => r.id === id) ?? null,
         setStatus: async (id, status, adminId) => {
             log.setStatus.push({ id, status, adminId });
             const row = rows.find((r) => r.id === id);
@@ -23,14 +27,16 @@ function fakeProfileAdmin({ rows = [pendingRow], auditFails = false } = {}) {
     };
 }
 
-async function setup(opts) {
-    const { auth, profiles, tokenFor } = fakeAuth({ user: approvedUser, admin: approvedAdmin });
+async function setup(opts = {}) {
+    const { auth, profiles, tokenFor } = fakeAuth({ user: approvedUser, admin: approvedAdmin, [SELF]: { ...approvedAdmin, id: SELF } });
     const profileAdmin = fakeProfileAdmin(opts);
     const notified = [];
-    const notifier = { userApproved: async (p) => notified.push(['approved', p.id]), userRejected: async (p) => notified.push(['rejected', p.id]) };
+    const notifier = opts.notifier ?? { userApproved: async (p) => notified.push(['approved', p.id]), userRejected: async (p) => notified.push(['rejected', p.id]) };
     const app = express();
     app.use(express.json());
     app.use(createAdminRouter({ auth, profileAdmin, profiles, notifier }));
+    // eslint-disable-next-line no-unused-vars
+    app.use((err, req, res, next) => res.status(500).json({ code: 'internal' }));
     const srv = await listen(app);
     const as = (who) => ({ Authorization: `Bearer ${tokenFor(who)}` });
     return { srv, as, profileAdmin, profiles, notified };
@@ -77,6 +83,38 @@ test('invalid id → 400, unknown id → 404', async () => {
     } finally { await srv.close(); }
 });
 
+test('approve: user without a verified mobile → 400, nothing changed', async () => {
+    const { srv, as, profileAdmin, notified } = await setup({ rows: [pendingRow, noPhoneRow] });
+    try {
+        const res = await fetch(`${srv.url}/api/admin/users/${NO_PHONE}/approve`, { method: 'POST', headers: as('admin') });
+        assert.equal(res.status, 400);
+        assert.deepEqual(await res.json(), { code: 'bad_request', message: "This user hasn't verified a mobile number yet." });
+        assert.deepEqual(profileAdmin.log.setStatus, []);
+        assert.deepEqual(notified, []);
+    } finally { await srv.close(); }
+});
+
+test('reject: works for a user without a verified mobile', async () => {
+    const { srv, as, notified } = await setup({ rows: [pendingRow, noPhoneRow] });
+    try {
+        const res = await fetch(`${srv.url}/api/admin/users/${NO_PHONE}/reject`, { method: 'POST', headers: as('admin') });
+        assert.equal(res.status, 200);
+        assert.deepEqual(notified, [['rejected', NO_PHONE]]);
+    } finally { await srv.close(); }
+});
+
+test('admin cannot approve or reject their own account', async () => {
+    const { srv, as, profileAdmin } = await setup({ rows: [pendingRow, { ...pendingRow, id: SELF }] });
+    try {
+        for (const action of ['approve', 'reject']) {
+            const res = await fetch(`${srv.url}/api/admin/users/${SELF}/${action}`, { method: 'POST', headers: as(SELF) });
+            assert.equal(res.status, 400, action);
+            assert.deepEqual(await res.json(), { code: 'bad_request', message: "You can't change your own account status." });
+        }
+        assert.deepEqual(profileAdmin.log.setStatus, []);
+    } finally { await srv.close(); }
+});
+
 test('approval succeeds when the audit write fails', async () => {
     const { srv, as, notified } = await setup({ auditFails: true });
     try {
@@ -118,4 +156,25 @@ test('profileAdmin.setStatus to rejected clears approved_at', async () => {
     const pa = createProfileAdmin({ supabaseUrl: 'https://x', serviceKey: 's', fetchImpl: async (url, init) => { body = JSON.parse(init.body); return new Response('[]', { status: 200 }); } });
     assert.equal(await pa.setStatus(TARGET, 'rejected', 'admin'), null);
     assert.equal(body.approved_at, null);
+});
+
+test('profileAdmin.getById selects the list fields and returns the row or null', async () => {
+    const calls = [];
+    let rows = [pendingRow];
+    const pa = createProfileAdmin({ supabaseUrl: 'https://op.supabase.co', serviceKey: 'svc', fetchImpl: async (url, init) => { calls.push({ url, init }); return new Response(JSON.stringify(rows), { status: 200 }); } });
+    assert.deepEqual(await pa.getById(TARGET), pendingRow);
+    assert.equal(calls[0].url, `https://op.supabase.co/rest/v1/profiles?id=eq.${TARGET}&select=id,full_name,email,phone,status,role,signup_provider,created_at,approved_at`);
+    assert.equal(calls[0].init.headers.Authorization, 'Bearer svc');
+    rows = [];
+    assert.equal(await pa.getById(TARGET), null);
+});
+
+test('an unexpected rejection in a handler reaches the Express error handler', async () => {
+    const boom = async () => { throw new Error('boom'); };
+    const { srv, as } = await setup({ notifier: { userApproved: boom, userRejected: boom } });
+    try {
+        const res = await fetch(`${srv.url}/api/admin/users/${TARGET}/approve`, { method: 'POST', headers: as('admin'), signal: AbortSignal.timeout(2000) });
+        assert.equal(res.status, 500);
+        assert.equal((await res.json()).code, 'internal');
+    } finally { await srv.close(); }
 });

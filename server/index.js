@@ -14,6 +14,7 @@ import { createNotifier } from './notify/notifier.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const config = loadConfig(process.env, { defaultPort: 3000 });
+if (!config.hubPublicUrl) console.warn('[server] HUB_PUBLIC_URL not set — browsers will be blocked from the ws-hub by CSP');
 
 const profiles = createProfileStore({
     fetchProfile: supabaseProfileFetcher({ supabaseUrl: config.supabaseUrl, serviceKey: config.supabaseServiceKey }),
@@ -27,7 +28,7 @@ const app = createApp({
     routers: [
         createKiteRouter({
             config, auth, kiteSession,
-            stateStore: createStateStore(),
+            stateStore: createStateStore({ secret: config.hubSharedSecret }),
             hub: createHubClient({ hubUrl: config.hubUrl, secret: config.hubSharedSecret }),
         }),
         createAdminRouter({

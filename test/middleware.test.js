@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
 import { createAuthMiddleware } from '../server/auth/middleware.js';
+import { createTokenVerifier } from '../server/auth/verifyToken.js';
+import { makeIssuer } from './helpers/tokens.js';
 import { fakeAuth, approvedUser, approvedAdmin } from './helpers/fakeAuth.js';
 import { listen } from './helpers/http.js';
 
@@ -161,5 +163,28 @@ test('profile lookup fails during refetch (service error during session recheck)
         assert.equal(res.status, 503);
         assert.equal((await res.json()).code, 'auth_unavailable');
         assert.equal(callCount, 2, 'store.get() must be called exactly twice (initial + refetch)');
+    } finally { await srv.close(); }
+});
+
+test('JWKS unreachable → 503 auth_unavailable; bad token with real verifier → 401', async () => {
+    const issuer = await makeIssuer('https://op-test.supabase.co');
+    const profiles = { get: async () => approvedUser, bust() {} };
+    const down = createAuthMiddleware({
+        verify: createTokenVerifier({ supabaseUrl: issuer.supabaseUrl, jwks: async () => { throw new TypeError('fetch failed'); } }),
+        profiles,
+    });
+    let srv = await serve(down);
+    try {
+        const res = await get(`${srv.url}/u`, await issuer.sign());
+        assert.equal(res.status, 503);
+        assert.equal((await res.json()).code, 'auth_unavailable');
+    } finally { await srv.close(); }
+
+    const up = createAuthMiddleware({ verify: createTokenVerifier({ supabaseUrl: issuer.supabaseUrl, jwks: issuer.jwks }), profiles });
+    srv = await serve(up);
+    try {
+        const res = await get(`${srv.url}/u`, 'garbage');
+        assert.equal(res.status, 401);
+        assert.equal((await res.json()).code, 'unauthenticated');
     } finally { await srv.close(); }
 });
