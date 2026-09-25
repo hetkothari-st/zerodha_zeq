@@ -154,6 +154,7 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
     const enabledRef = useRef(enabled);
     const isReady = useRef(false);
     const pendingSubs = useRef([]);
+    const authFailed = useRef(false);
 
     // instrument_token → exchange_token (string)
     const tokenMap = useRef(new Map());
@@ -297,8 +298,18 @@ export const useMarketData = (enabled = true, onMessage = null, onDepthPacket = 
                     try {
                         const msg = JSON.parse(text);
                         if (msg.type === 'auth_error') {
-                            console.error('[KiteWS] Token expired, redirecting to login...');
-                            window.location.href = '/kite/login';
+                            // Stay on the page: redirecting to /kite/login lands users on Kite's
+                            // raw JSON error when the API key has expired. status 'error' shows
+                            // the reconnect panel instead.
+                            console.error('[KiteWS] Zerodha auth failed:', msg.message);
+                            authFailed.current = true;
+                            setStatus('error');
+                            return;
+                        }
+                        if (msg.type === 'auth_success' && authFailed.current) {
+                            // Hub has a fresh token — reconnect so subscriptions are replayed.
+                            authFailed.current = false;
+                            ws.current.close();
                             return;
                         }
                         if (msg.type === 'error') console.error('[KiteWS] Error:', msg.data);

@@ -201,11 +201,29 @@ app.get('/api/kite-config', (req, res) => {
     });
 });
 
-app.get('/kite/login', (req, res) => {
+app.get('/kite/login', async (req, res) => {
     if (!ZERODHA_API_KEY) {
         return res.status(400).send('ZERODHA_API_KEY not configured in .env');
     }
     const redirectUrl = `https://kite.zerodha.com/connect/login?v=3&api_key=${ZERODHA_API_KEY}`;
+
+    // Kite answers an expired/invalid api_key with a bare JSON error page.
+    // Check first so users get a readable page with a way back to the app.
+    try {
+        const check = await fetch(redirectUrl, { redirect: 'manual' });
+        if ((check.headers.get('content-type') || '').includes('application/json')) {
+            const body = await check.json().catch(() => ({}));
+            console.error('[kite] Login rejected by Kite:', body.message || check.status);
+            return res.status(503).send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Zerodha Unavailable</title>
+<style>body{background:#050505;color:#fff;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:12px;text-align:center;padding:0 16px}
+.err{color:#f87171;font-size:1.1rem;font-weight:bold}.sub{color:#ffffff80;font-size:.8rem}a{color:#387ed1}</style></head>
+<body><div class="err">Zerodha login is unavailable</div>
+<div class="sub">The Kite Connect API key was rejected. Renew the Kite Connect app subscription or update ZERODHA_API_KEY.</div>
+<a href="/">&larr; Back to app</a></body></html>`);
+        }
+    } catch (err) {
+        console.warn('[kite] Could not pre-check Kite login:', err.message);
+    }
     res.redirect(redirectUrl);
 });
 

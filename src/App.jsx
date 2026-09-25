@@ -971,7 +971,7 @@ const AuthedApp = ({ user, logout }) => {
                             </button>
                             <div className="w-px h-4 bg-white/10" />
                             <a
-                                href={`http://${window.location.hostname}:3001/kite/login`}
+                                href={"/kite/login"}
                                 className="flex items-center gap-1 text-[10px] px-3 py-1 rounded border border-[#387ed1]/30 bg-[#387ed1]/10 text-[#387ed1] font-bold uppercase tracking-wider hover:bg-[#387ed1]/20 transition-all"
                             >
                                 <LogIn size={10} /> Login
