@@ -40,6 +40,11 @@ grant update (full_name) on public.profiles to authenticated;
 revoke all on public.admin_audit_log from anon, authenticated;
 revoke all on sequence public.admin_audit_log_id_seq from anon, authenticated;
 
+-- Server-side access (service_role key via PostgREST): explicit, not reliant on default privileges.
+grant select, update on public.profiles to service_role;
+grant select, insert on public.admin_audit_log to service_role;
+grant usage on sequence public.admin_audit_log_id_seq to service_role;
+
 -- New auth user → pending profile.
 create function public.handle_new_user() returns trigger
 language plpgsql security definer set search_path = '' as $$
@@ -94,6 +99,10 @@ declare
 begin
     if auth.uid() is null or sid is null then
         raise exception 'not authenticated' using errcode = '28000';
+    end if;
+    -- A displaced device's JWT stays valid until expiry; only a live session may claim.
+    if not exists (select 1 from auth.sessions s where s.id = sid and s.user_id = auth.uid()) then
+        raise exception 'session is not active' using errcode = '28000';
     end if;
     update public.profiles set current_session_id = sid where id = auth.uid();
 end $$;

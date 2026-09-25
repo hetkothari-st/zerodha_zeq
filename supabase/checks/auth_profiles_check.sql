@@ -53,6 +53,23 @@ begin
     raise notice 'ok: phone set correctly at insert time for pre-verified number';
 end $$;
 
+-- Live auth sessions: user 1 owns ...aa, user 2 owns ...cc.
+insert into auth.sessions (id, user_id) values
+    ('00000000-0000-4000-8000-0000000000aa', '00000000-0000-4000-8000-000000000001'),
+    ('00000000-0000-4000-8000-0000000000cc', '00000000-0000-4000-8000-000000000002');
+
+-- The servers' service_role key needs exactly these privileges.
+do $$ begin
+    if not (has_table_privilege('service_role', 'public.profiles', 'select')
+        and has_table_privilege('service_role', 'public.profiles', 'update')
+        and has_table_privilege('service_role', 'public.admin_audit_log', 'select')
+        and has_table_privilege('service_role', 'public.admin_audit_log', 'insert')
+        and has_sequence_privilege('service_role', 'public.admin_audit_log_id_seq', 'usage')) then
+        raise exception 'FAIL: service_role is missing profile/audit-log privileges';
+    end if;
+    raise notice 'ok: service_role has select/update on profiles, select/insert on audit log, sequence usage';
+end $$;
+
 set local role authenticated;
 select set_config('request.jwt.claims',
     '{"sub":"00000000-0000-4000-8000-000000000001","session_id":"00000000-0000-4000-8000-0000000000aa","role":"authenticated"}', true);
@@ -152,6 +169,36 @@ do $$ begin
     exception when sqlstate '28000' then
         raise notice 'ok: claim_session rejects claims without session_id';
     end;
+end $$;
+
+-- claim_session() must reject a session that is not a live auth session of this user
+-- (e.g. a displaced device's still-valid JWT after its session row was removed).
+do $$ begin
+    begin
+        perform set_config('request.jwt.claims',
+            '{"sub":"00000000-0000-4000-8000-000000000001","session_id":"00000000-0000-4000-8000-0000000000dd","role":"authenticated"}', true);
+        perform public.claim_session();
+        raise exception 'FAIL: claim_session accepted a session_id not present in auth.sessions';
+    exception when sqlstate '28000' then
+        raise notice 'ok: claim_session rejects a session_id not present in auth.sessions';
+    end;
+    begin
+        perform set_config('request.jwt.claims',
+            '{"sub":"00000000-0000-4000-8000-000000000001","session_id":"00000000-0000-4000-8000-0000000000cc","role":"authenticated"}', true);
+        perform public.claim_session();
+        raise exception 'FAIL: claim_session accepted another user''s session';
+    exception when sqlstate '28000' then
+        raise notice 'ok: claim_session rejects another user''s session';
+    end;
+end $$;
+do $$
+declare v_sid uuid;
+begin
+    select current_session_id into v_sid from public.profiles where id = '00000000-0000-4000-8000-000000000001';
+    if v_sid is distinct from '00000000-0000-4000-8000-0000000000aa'::uuid then
+        raise exception 'FAIL: rejected claim_session changed current_session_id (got %)', v_sid;
+    end if;
+    raise notice 'ok: rejected claims leave current_session_id unchanged';
 end $$;
 
 -- anon must not be able to read profiles or claim a session at all.
