@@ -9,6 +9,7 @@ const fmt = (iso) => (iso ? new Date(iso).toLocaleDateString('en-IN', { day: 'nu
 export default function PlanChip() {
     const ent = useEntitlement();
     const [open, setOpen] = useState(false);
+    if (ent.loading) return null;
     if (!ent.billingEnabled) return null;
     if (!ent.isPro) {
         return (

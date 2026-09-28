@@ -12,6 +12,13 @@ function Probe() {
     return <div>{e.loading ? 'loading' : `${e.plan}|${e.isPro}|${e.billingEnabled}`}<button onClick={e.openUpgrade}>up</button></div>;
 }
 
+// Unlike Probe, always shows loading + isPro together — needed to assert isPro is true
+// *while* loading (Probe collapses to the literal text "loading" in that state).
+function ProbeAlways() {
+    const e = useEntitlement();
+    return <div>{`${e.loading}|${e.isPro}`}</div>;
+}
+
 describe('EntitlementProvider', () => {
     it('loads status and exposes isPro', async () => {
         apiFetchRef.current = vi.fn(async () => ({ ok: true, status: 200, data: { plan: 'pro', source: 'subscription', until: null, status: 'active', cancelAtPeriodEnd: false, manageUrl: null, priceLabel: '' } }));
@@ -24,10 +31,61 @@ describe('EntitlementProvider', () => {
         render(<EntitlementProvider><Probe /></EntitlementProvider>);
         expect(await screen.findByText('pro|true|false')).toBeInTheDocument();
     });
-    it('other errors keep Free and stop loading', async () => {
-        apiFetchRef.current = vi.fn(async () => ({ ok: false, status: 503, code: 'auth_unavailable' }));
+    it('isPro is true before the first response resolves (unknown entitlement acts as Pro)', () => {
+        apiFetchRef.current = vi.fn(() => new Promise(() => {})); // never resolves
+        render(<EntitlementProvider><ProbeAlways /></EntitlementProvider>);
+        expect(screen.getByText('true|true')).toBeInTheDocument();
+    });
+    it('other errors before the first success keep loading (isPro true) and retry with backoff until one succeeds', async () => {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        let call = 0;
+        apiFetchRef.current = vi.fn(async () => {
+            call += 1;
+            if (call < 4) return { ok: false, status: 503, code: 'auth_unavailable' };
+            return { ok: true, status: 200, data: { plan: 'free' } };
+        });
         render(<EntitlementProvider><Probe /></EntitlementProvider>);
+        await waitFor(() => expect(apiFetchRef.current).toHaveBeenCalledTimes(1));
+        expect(screen.getByText('loading')).toBeInTheDocument();
+        await act(async () => { await vi.advanceTimersByTimeAsync(2000); }); // 1st retry
+        await waitFor(() => expect(apiFetchRef.current).toHaveBeenCalledTimes(2));
+        expect(screen.getByText('loading')).toBeInTheDocument();
+        await act(async () => { await vi.advanceTimersByTimeAsync(5000); }); // 2nd retry
+        await waitFor(() => expect(apiFetchRef.current).toHaveBeenCalledTimes(3));
+        expect(screen.getByText('loading')).toBeInTheDocument();
+        await act(async () => { await vi.advanceTimersByTimeAsync(15000); }); // 3rd retry succeeds
+        await waitFor(() => expect(apiFetchRef.current).toHaveBeenCalledTimes(4));
         expect(await screen.findByText('free|false|true')).toBeInTheDocument();
+        vi.useRealTimers();
+    });
+    it('clears the retry timer on unmount (no further retries fire)', async () => {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        apiFetchRef.current = vi.fn(async () => ({ ok: false, status: 503, code: 'auth_unavailable' }));
+        const { unmount } = render(<EntitlementProvider><Probe /></EntitlementProvider>);
+        await waitFor(() => expect(apiFetchRef.current).toHaveBeenCalledTimes(1));
+        unmount();
+        await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
+        expect(apiFetchRef.current).toHaveBeenCalledTimes(1);
+        vi.useRealTimers();
+    });
+    it('after a first success, a later error keeps the last known state (not reverted to loading/unknown)', async () => {
+        let call = 0;
+        apiFetchRef.current = vi.fn(async () => {
+            call += 1;
+            if (call === 1) return { ok: true, status: 200, data: { plan: 'pro', source: 'subscription' } };
+            return { ok: false, status: 503, code: 'auth_unavailable' };
+        });
+        render(<EntitlementProvider><Probe /></EntitlementProvider>);
+        expect(await screen.findByText('pro|true|true')).toBeInTheDocument();
+        act(() => { window.dispatchEvent(new Event('focus')); });
+        await waitFor(() => expect(apiFetchRef.current).toHaveBeenCalledTimes(2));
+        expect(screen.getByText('pro|true|true')).toBeInTheDocument();
+    });
+    it('openUpgrade does not show the modal while loading', () => {
+        apiFetchRef.current = vi.fn(() => new Promise(() => {}));
+        render(<EntitlementProvider><Probe /></EntitlementProvider>);
+        act(() => screen.getByText('up').click());
+        expect(screen.queryByText('upgrade-modal')).toBeNull();
     });
     it('re-checks on window focus and on the poll interval', async () => {
         vi.useFakeTimers({ shouldAdvanceTime: true });

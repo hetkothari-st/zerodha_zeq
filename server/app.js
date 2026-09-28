@@ -24,6 +24,9 @@ export function createApp({ config, distDir, routers }) {
             },
         },
         crossOriginEmbedderPolicy: false,
+        // Razorpay Checkout opens a popup (netbanking / 3DS); 'same-origin' (helmet's default)
+        // severs window.opener and breaks the popup handshake back to the parent page.
+        crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
     }));
 
     const WEBHOOK_PATH = '/api/billing/webhook';

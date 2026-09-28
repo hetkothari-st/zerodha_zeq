@@ -24,6 +24,10 @@ describe('PlanChip', () => {
         const { container } = render(<EntitlementContext.Provider value={{ billingEnabled: false, isPro: true }}><PlanChip /></EntitlementContext.Provider>);
         expect(container).toBeEmptyDOMElement();
     });
+    it('renders nothing while loading', () => {
+        const { container } = render(<EntitlementContext.Provider value={{ loading: true, billingEnabled: true, isPro: true }}><PlanChip /></EntitlementContext.Provider>);
+        expect(container).toBeEmptyDOMElement();
+    });
     it('Comp: label only, no billing controls', async () => {
         renderChip({ isPro: true, plan: 'pro', source: 'comp' });
         await userEvent.click(screen.getByRole('button', { name: 'Pro' }));

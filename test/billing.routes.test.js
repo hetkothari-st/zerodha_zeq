@@ -102,11 +102,71 @@ test('subscribe creates a Razorpay subscription and stores it', async () => {
 
 test('subscribe reuses an open created subscription', async () => {
     const billing = fakeBilling({ subs: [{ user_id: USER, razorpay_subscription_id: 'sub_old', status: 'created' }] });
-    const { srv, headers, razorpay } = await setup({ billing });
+    const remote = { sub_old: { id: 'sub_old', status: 'created', plan_id: 'plan_1' } };
+    const { srv, headers, razorpay } = await setup({ billing, razorpay: fakeRazorpay({ remote }) });
     try {
         const body = await (await fetch(`${srv.url}/api/billing/subscribe`, { method: 'POST', headers })).json();
         assert.equal(body.subscriptionId, 'sub_old');
         assert.equal(razorpay.log.created.length, 0);
+    } finally { await srv.close(); }
+});
+
+test('subscribe: reused open row gone at Razorpay (404) is expired locally, then a new one is created', async () => {
+    const billing = fakeBilling({ subs: [{ user_id: USER, razorpay_subscription_id: 'sub_old', status: 'created' }] });
+    const { srv, headers, razorpay } = await setup({ billing, razorpay: fakeRazorpay({ remote: {} }) });
+    try {
+        const res = await fetch(`${srv.url}/api/billing/subscribe`, { method: 'POST', headers });
+        assert.equal(res.status, 200);
+        assert.equal((await res.json()).subscriptionId, 'sub_new1');
+        assert.equal(billing.subs.find((s) => s.razorpay_subscription_id === 'sub_old').status, 'expired');
+        assert.equal(razorpay.log.created.length, 1);
+    } finally { await srv.close(); }
+});
+
+test('subscribe: reused open row is for a different plan is expired locally, then a new one is created', async () => {
+    const billing = fakeBilling({ subs: [{ user_id: USER, razorpay_subscription_id: 'sub_old', status: 'created' }] });
+    const remote = { sub_old: { id: 'sub_old', status: 'created', plan_id: 'plan_other' } };
+    const { srv, headers } = await setup({ billing, razorpay: fakeRazorpay({ remote }) });
+    try {
+        const body = await (await fetch(`${srv.url}/api/billing/subscribe`, { method: 'POST', headers })).json();
+        assert.equal(body.subscriptionId, 'sub_new1');
+        assert.equal(billing.subs.find((s) => s.razorpay_subscription_id === 'sub_old').status, 'expired');
+    } finally { await srv.close(); }
+});
+
+test('subscribe: reused open row already progressed at Razorpay (status != created) is expired locally, then a new one is created', async () => {
+    const billing = fakeBilling({ subs: [{ user_id: USER, razorpay_subscription_id: 'sub_old', status: 'created' }] });
+    const remote = { sub_old: { id: 'sub_old', status: 'active', plan_id: 'plan_1' } };
+    const { srv, headers } = await setup({ billing, razorpay: fakeRazorpay({ remote }) });
+    try {
+        const body = await (await fetch(`${srv.url}/api/billing/subscribe`, { method: 'POST', headers })).json();
+        assert.equal(body.subscriptionId, 'sub_new1');
+        assert.equal(billing.subs.find((s) => s.razorpay_subscription_id === 'sub_old').status, 'expired');
+    } finally { await srv.close(); }
+});
+
+test('subscribe: fetchSubscription transient failure (Razorpay down) on a reused row → 503, row untouched', async () => {
+    const billing = fakeBilling({ subs: [{ user_id: USER, razorpay_subscription_id: 'sub_old', status: 'created' }] });
+    const razorpay = fakeRazorpay();
+    razorpay.fetchSubscription = async () => { throw new RazorpayError('down', 0); };
+    const { srv, headers } = await setup({ billing, razorpay });
+    try {
+        const res = await fetch(`${srv.url}/api/billing/subscribe`, { method: 'POST', headers });
+        assert.equal(res.status, 503);
+        assert.equal((await res.json()).message, 'Payments unavailable, try later.');
+        assert.equal(billing.subs[0].status, 'created');
+    } finally { await srv.close(); }
+});
+
+test('subscribe: fetchSubscription 5xx failure on a reused row → 503, row untouched', async () => {
+    const billing = fakeBilling({ subs: [{ user_id: USER, razorpay_subscription_id: 'sub_old', status: 'created' }] });
+    const razorpay = fakeRazorpay();
+    razorpay.fetchSubscription = async () => { throw new RazorpayError('server error', 502); };
+    const { srv, headers } = await setup({ billing, razorpay });
+    try {
+        const res = await fetch(`${srv.url}/api/billing/subscribe`, { method: 'POST', headers });
+        assert.equal(res.status, 503);
+        assert.equal(billing.subs[0].status, 'created');
     } finally { await srv.close(); }
 });
 
@@ -286,6 +346,20 @@ test('webhook: unknown subscription not found at Razorpay (404) is terminal — 
         assert.equal(res.status, 200);
         assert.deepEqual(await res.json(), { ok: true, ignored: true });
         assert.equal(billing.log.inserted.length, 0);
+        const again = await fetch(`${srv.url}/api/billing/webhook`, req);
+        assert.deepEqual(await again.json(), { ok: true, duplicate: true });
+    } finally { await srv.close(); }
+});
+
+test('webhook: existing-row update conflict (409, one-open-per-user violation) is terminal — ignored', async () => {
+    const billing = fakeBilling({ subs: [{ user_id: USER, razorpay_subscription_id: 'sub_1', status: 'halted' }] });
+    billing.updateSubscription = async () => { const err = new Error('duplicate key value violates unique constraint "one_open_subscription_per_user"'); err.status = 409; throw err; };
+    const { srv } = await setup({ billing });
+    try {
+        const req = signed(subEvent('subscription.activated', { id: 'sub_1', status: 'active', current_end: 1767225600 }), { eventId: 'evt_update_conflict' });
+        const res = await fetch(`${srv.url}/api/billing/webhook`, req);
+        assert.equal(res.status, 200);
+        assert.deepEqual(await res.json(), { ok: true, ignored: true, conflict: true });
         const again = await fetch(`${srv.url}/api/billing/webhook`, req);
         assert.deepEqual(await again.json(), { ok: true, duplicate: true });
     } finally { await srv.close(); }

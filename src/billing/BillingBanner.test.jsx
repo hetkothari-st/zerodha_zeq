@@ -20,4 +20,8 @@ describe('BillingBanner', () => {
         const { container } = renderWith({ status: 'active' });
         expect(container).toBeEmptyDOMElement();
     });
+    it('renders nothing while loading, even with a pending/halted status queued', () => {
+        const { container } = renderWith({ loading: true, status: 'pending', manageUrl: 'https://rzp.io/i/x' });
+        expect(container).toBeEmptyDOMElement();
+    });
 });

@@ -62,6 +62,14 @@ test('security headers: CSP with frame-ancestors none, no x-powered-by', async (
     } finally { await srv.close(); }
 });
 
+test('security headers: Cross-Origin-Opener-Policy allows Razorpay Checkout popups', async () => {
+    const srv = await setup();
+    try {
+        const res = await fetch(srv.url + '/');
+        assert.equal(res.headers.get('cross-origin-opener-policy'), 'same-origin-allow-popups');
+    } finally { await srv.close(); }
+});
+
 test('malformed JSON → 400 bad_request JSON, not an HTML stack trace', async () => {
     const srv = await setup();
     try {

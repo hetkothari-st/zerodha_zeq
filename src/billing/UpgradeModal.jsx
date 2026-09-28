@@ -30,14 +30,20 @@ export default function UpgradeModal({ onClose, pollIntervalMs = 2000, pollTimeo
         }
         if (!alive.current) return;
         setPhase('checkout');
-        const result = await checkout.openCheckout(Razorpay, {
-            keyId: r.data.keyId,
-            subscriptionId: r.data.subscriptionId,
-            name: theme.productName,
-            description: 'Pro — monthly',
-            prefill: { name: profile?.full_name || '', email: profile?.email || '' },
-            color: theme.accent,
-        });
+        let result;
+        try {
+            result = await checkout.openCheckout(Razorpay, {
+                keyId: r.data.keyId,
+                subscriptionId: r.data.subscriptionId,
+                name: theme.productName,
+                description: 'Pro — monthly',
+                prefill: { name: profile?.full_name || '', email: profile?.email || '' },
+                color: theme.accent,
+            });
+        } catch {
+            return fail('Could not open the payment window. Please try again.');
+        }
+        if (!alive.current) return;
         if (result.outcome !== 'paid') return fail(result.reason || 'Payment cancelled. You have not been charged.');
         if (!alive.current) return;
         setPhase('activating');

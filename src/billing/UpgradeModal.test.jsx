@@ -49,6 +49,13 @@ describe('UpgradeModal', () => {
         await userEvent.click(screen.getByRole('button', { name: 'Upgrade to Pro' }));
         expect(await screen.findByRole('alert')).toHaveTextContent('Could not load the payment window');
     });
+    it('openCheckout throwing shows a retry message and stays idle', async () => {
+        const { checkout } = setup();
+        checkout.openCheckout.mockRejectedValueOnce(new Error('Razorpay is not defined'));
+        await userEvent.click(screen.getByRole('button', { name: 'Upgrade to Pro' }));
+        expect(await screen.findByRole('alert')).toHaveTextContent('Could not open the payment window. Please try again.');
+        expect(screen.getByRole('button', { name: 'Upgrade to Pro' })).toBeEnabled();
+    });
     it('dismissed checkout shows the reason, not charged', async () => {
         setup({ outcome: { outcome: 'dismissed', reason: 'UPI mandate declined' } });
         await userEvent.click(screen.getByRole('button', { name: 'Upgrade to Pro' }));

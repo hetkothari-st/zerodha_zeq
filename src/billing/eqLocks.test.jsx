@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import React from 'react';
+import { describe, it, expect, vi } from 'vitest';
+import { render, screen } from '@testing-library/react';
 import { eqFreeView, FREE_BUCKET } from './eqFreeView';
+import { EntitlementProvider, useEntitlement } from './EntitlementProvider';
 
 const base = {
     monitors: [{ id: 0 }, { id: 2 }], activeMonitorId: 2,
@@ -24,5 +27,34 @@ describe('eqFreeView', () => {
         expect(FREE_BUCKET).toBe(5);
         expect(v.extraFor(0)).toEqual([]);
         expect(v.volumeUnit).toBe('auto');
+    });
+});
+
+// C1 (Eq check): while entitlement is still unknown (EntitlementProvider hasn't gotten its
+// first response), isPro reads true — so eqFreeView must not prune a user's saved extra stocks
+// just because the provider is loading. EntitlementProvider.jsx is a shared file with its own
+// (shared, byte-identical) test suite that proves isPro is true while loading; this test proves
+// the wiring all the way through to eqFreeView, which is Eq-only.
+vi.mock('../auth/AuthProvider', () => ({
+    useAuth: () => ({ apiFetch: () => new Promise(() => {}), session: { user: { id: 'u1' } } }),
+}));
+
+function Probe() {
+    const { isPro, loading } = useEntitlement();
+    const view = eqFreeView({
+        isPro,
+        monitors: [{ id: 0 }],
+        activeMonitorId: 0,
+        bucketSizes: { 0: 1 },
+        extraStocks: { 0: [{ symbol: 'IRCTC' }, { symbol: 'ZOMATO' }] },
+        volumeUnit: 'Cr',
+    });
+    return <div>{`loading:${loading}|extras:${view.extraFor(0).map((s) => s.symbol).join(',')}`}</div>;
+}
+
+describe('eqFreeView while EntitlementProvider is still loading (isPro from a loading context)', () => {
+    it('mounts with the provider loading and extraFor() still returns the saved extras, not []', () => {
+        render(<EntitlementProvider><Probe /></EntitlementProvider>);
+        expect(screen.getByText('loading:true|extras:IRCTC,ZOMATO')).toBeInTheDocument();
     });
 });

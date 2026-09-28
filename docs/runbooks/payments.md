@@ -1,5 +1,13 @@
 # Payments runbook (Razorpay)
 
+## Deploying this code (even with billing off)
+Apply `supabase/migrations/20260929000000_billing.sql` to **both** Supabase projects —
+Funnel Op (`nqnylxxpnussanswccgg`) and Funnel Eq (`yntcmnvttxscqtsmxmna`) — **before** deploying
+this code, even if RAZORPAY_* vars are not set yet and billing stays off. The admin user list
+embeds `subscriptions(...)` and the Approve flow reads it too; both fail without the table.
+Run `npx supabase@latest db push` (linked to that project) or paste the migration into the SQL
+editor, once per project.
+
 ## One-time setup (per product: Funnel Op and Funnel Eq separately)
 1. Razorpay dashboard → complete KYC. Ask support to enable **Subscriptions** (and UPI AutoPay).
 2. Test mode: Subscriptions → Plans → Create plan: period monthly, interval 1, amount = your price. Copy `plan_…`.
@@ -20,13 +28,26 @@
 - Webhook deliveries: Razorpay dashboard → Webhooks → the endpoint → recent deliveries should be 200.
 
 ## Go live
-Create the live plan + live keys + live webhook, replace the four Railway variables, deploy.
+1. Clear this product's Supabase test data **before any live payment is taken** — run only at
+   go-live, not routinely:
+   `delete from public.subscriptions; delete from public.billing_events;`
+   (Do NOT use `update subscriptions set status='expired' where razorpay_subscription_id like
+   'sub_%'` — that leaves test rows behind and does not clear `billing_events`, so a live webhook
+   event id that happens to collide with a test one would be silently treated as a duplicate.)
+2. Create the live plan + live keys + live webhook.
+3. Replace the four RAZORPAY_* Railway variables (RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET,
+   RAZORPAY_WEBHOOK_SECRET, RAZORPAY_PLAN_ID) with the live values, and update PRO_PRICE_LABEL to
+   match the live plan's actual price. Deploy.
 
 ## Complimentary Pro
 /admin → Users → find by email → **Comp Pro**. Remove with **Remove comp**.
 
 ## Turn billing off
 Unset any one of the four RAZORPAY_* variables and redeploy: every user is treated as Pro.
+**Warning:** this does not stop Razorpay from charging existing subscribers — their auto-renew
+(UPI AutoPay / card e-mandate) keeps running and Razorpay keeps collecting payment regardless of
+what this app does. Before turning billing off, either cancel all active subscriptions in the
+Razorpay dashboard first, or confirm there are no live subscribers.
 
 ## Troubleshooting
 - Paid but still Free: check webhook deliveries (signature errors = wrong RAZORPAY_WEBHOOK_SECRET),

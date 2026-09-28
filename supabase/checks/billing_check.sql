@@ -79,6 +79,12 @@ begin
     if has_table_privilege('authenticated', 'public.subscriptions', 'insert') then
         raise exception 'FAIL: authenticated can insert subscriptions';
     end if;
+    if has_table_privilege('authenticated', 'public.subscriptions', 'update') then
+        raise exception 'FAIL: authenticated can update subscriptions';
+    end if;
+    if has_column_privilege('authenticated', 'public.profiles', 'comp_pro', 'update') then
+        raise exception 'FAIL: authenticated can update profiles.comp_pro';
+    end if;
     raise notice 'ok: billing privileges locked down';
 end $$;
 

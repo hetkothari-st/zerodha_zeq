@@ -35,7 +35,31 @@ export function createBillingRouter({ auth, billing, razorpay, planId, keyId, we
             return sendError(res, 'auth_unavailable', 'Billing is temporarily unavailable.');
         }
         if (ent.plan === 'pro') return sendError(res, 'conflict', 'You already have Pro.');
-        if (open?.status === 'created') return res.json({ subscriptionId: open.razorpay_subscription_id, keyId });
+
+        if (open?.status === 'created') {
+            // The local row may be stale: gone at Razorpay, for a different plan (e.g. plan
+            // changed since it was created), or already moved past 'created' there. Check
+            // before handing it back so we never resurrect a dead checkout.
+            let remote = null;
+            try {
+                remote = await razorpay.fetchSubscription(open.razorpay_subscription_id);
+            } catch (err) {
+                if (err.status !== 404) {
+                    console.error('[billing] subscribe: fetchSubscription failed:', err.message);
+                    return sendError(res, 'payments_unavailable');
+                }
+                remote = null; // 404: gone at Razorpay — stale, fall through to expire + recreate
+            }
+            const stale = !remote || remote.plan_id !== planId || remote.status !== 'created';
+            if (!stale) return res.json({ subscriptionId: open.razorpay_subscription_id, keyId });
+            try {
+                await billing.updateSubscription(open.razorpay_subscription_id, { status: 'expired' });
+            } catch (err) {
+                console.error('[billing] subscribe: expiring stale row failed:', err.message);
+                return sendError(res, 'auth_unavailable', 'Billing is temporarily unavailable.');
+            }
+            open = null; // continue below to create a fresh subscription
+        }
         if (open) return sendError(res, 'conflict', 'Your subscription is being activated. Refresh in a minute.');
 
         let sub;
@@ -143,6 +167,14 @@ export function createBillingRouter({ auth, billing, razorpay, planId, keyId, we
             try {
                 updated = await billing.updateSubscription(entity.id, { ...fields, last_event_at: eventAt }, { notAfter: eventAt });
             } catch (err) {
+                if (err.status === 409) {
+                    // One-open-subscription-per-user unique violation: an old halted/cancelled
+                    // subscription for this user was revived by this event while a newer one is
+                    // already open. This will never resolve on retry — terminal, not a DB blip.
+                    console.error(`[billing] CONFLICT updating subscription ${entity.id} for user ${existing.user_id} (event ${eventId}): ${err.message}`);
+                    await recordProcessed();
+                    return res.json({ ok: true, ignored: true, conflict: true });
+                }
                 console.error(`[billing] webhook update failed for ${entity.id}:`, err.message);
                 return sendError(res, 'internal');
             }

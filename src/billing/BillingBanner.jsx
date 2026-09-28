@@ -2,7 +2,8 @@ import React from 'react';
 import { useEntitlement } from './EntitlementProvider';
 
 export default function BillingBanner() {
-    const { billingEnabled, status, manageUrl, openUpgrade } = useEntitlement();
+    const { loading, billingEnabled, status, manageUrl, openUpgrade } = useEntitlement();
+    if (loading) return null;
     if (!billingEnabled) return null;
     if (status === 'pending') {
         return (
