@@ -2,3 +2,4 @@
 /dist
 .env
 ws-hub/.env
+migration-report-*.json

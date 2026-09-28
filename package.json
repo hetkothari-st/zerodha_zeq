@@ -10,7 +10,10 @@
         "build": "vite build",
         "preview": "vite preview",
         "test": "node --test \"test/**/*.test.js\"",
-        "test:web": "vitest run"
+        "test:web": "vitest run",
+        "migrate:users": "node scripts/migrate-app-users.mjs",
+        "test:e2e": "playwright test -c e2e",
+        "e2e:cleanup": "node e2e/cleanup.mjs"
     },
     "dependencies": {
         "@supabase/supabase-js": "^2.117.2",
@@ -28,6 +31,7 @@
         "ws": "^8.18.0"
     },
     "devDependencies": {
+        "@playwright/test": "^1.63.0",
         "@testing-library/dom": "^10.4.2",
         "@testing-library/jest-dom": "^6.9.1",
         "@testing-library/react": "^16.3.3",
