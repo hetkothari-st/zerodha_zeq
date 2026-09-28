@@ -13,23 +13,10 @@ import { ProBadge, useProAction } from './billing/ProGate';
 import PlanChip from './billing/PlanChip';
 import BillingBanner from './billing/BillingBanner';
 import { eqFreeView } from './billing/eqFreeView';
+import { GatedFilter } from './billing/GatedFilter';
 
 function cn(...inputs) {
     return twMerge(clsx(inputs));
-}
-
-// Renders as a plain div when unlocked, or a button that opens the upgrade
-// modal when locked — used to wrap Pro-only filters (Timeframe, Vol Unit)
-// whose inner <select> is `disabled` and would otherwise swallow clicks.
-function GatedFilter({ isLocked, onUnlock, className, children }) {
-    if (isLocked) {
-        return (
-            <button type="button" onClick={onUnlock} className={className}>
-                {children}
-            </button>
-        );
-    }
-    return <div className={className}>{children}</div>;
 }
 
 // Default stocks already shown in the columns. Listed here so the dropdown can
@@ -864,13 +851,12 @@ const AuthedApp = ({ user, logout }) => {
                     </div>
                 </div>
 
-                {/* Timeframe filter (per active monitor) — Pro only. The
-                    <select> is `disabled` for Free, and since a disabled
-                    select swallows clicks, the whole filter is wrapped in a
-                    button that opens the upgrade modal instead. */}
+                {/* Timeframe filter (per active monitor) — Pro only. See
+                    GatedFilter: a disabled <select> never dispatches click,
+                    so Free renders it inert under an overlay button that
+                    catches every click and opens the upgrade modal. */}
                 <GatedFilter
-                    isLocked={!isPro}
-                    onUnlock={openUpgrade}
+                    label="Timeframe"
                     className="flex items-center gap-1.5 bg-white/[0.04] border border-white/10 rounded px-2 h-8 ml-3"
                 >
                     <span className="text-[9px] font-black text-white/40 uppercase tracking-wider">Timeframe Filters</span>
@@ -878,6 +864,7 @@ const AuthedApp = ({ user, logout }) => {
                         value={activeBucketSize}
                         onChange={(e) => handleSetBucketSizeForActive(Number(e.target.value))}
                         disabled={!isPro}
+                        tabIndex={isPro ? 0 : -1}
                         className="bg-transparent text-[12px] font-black text-emerald-300 font-mono tabular-nums focus:outline-none cursor-pointer disabled:cursor-not-allowed"
                     >
                         {BUCKET_OPTIONS.map(o => (
@@ -886,13 +873,11 @@ const AuthedApp = ({ user, logout }) => {
                             </option>
                         ))}
                     </select>
-                    {!isPro && <ProBadge className="ml-1" />}
                 </GatedFilter>
 
                 {/* Volume unit filter — Pro only, same gating pattern. */}
                 <GatedFilter
-                    isLocked={!isPro}
-                    onUnlock={openUpgrade}
+                    label="Volume unit"
                     className="flex items-center gap-1.5 bg-white/[0.04] border border-white/10 rounded px-2 h-8"
                 >
                     <span className="text-[9px] font-black text-white/40 uppercase tracking-wider">Vol Unit</span>
@@ -900,6 +885,7 @@ const AuthedApp = ({ user, logout }) => {
                         value={view.volumeUnit}
                         onChange={(e) => setVolumeUnit(e.target.value)}
                         disabled={!isPro}
+                        tabIndex={isPro ? 0 : -1}
                         className="bg-transparent text-[12px] font-black text-violet-300 font-mono tabular-nums focus:outline-none cursor-pointer disabled:cursor-not-allowed"
                     >
                         {VOLUME_UNIT_OPTIONS.map(o => (
@@ -908,7 +894,6 @@ const AuthedApp = ({ user, logout }) => {
                             </option>
                         ))}
                     </select>
-                    {!isPro && <ProBadge className="ml-1" />}
                 </GatedFilter>
 
                 {/* Add Stock has moved to the monitor tab bar below. */}

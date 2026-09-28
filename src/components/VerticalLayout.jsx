@@ -1191,6 +1191,9 @@ const StockColumn = ({
         return { regularRows: regular, pinnedRows: pinned };
     }, [reversed, consensusByMinute, totalSlots]);
 
+    // Free plan: no pinned consensus rows.
+    const visiblePinnedRows = isPro ? pinnedRows : [];
+
     // Sum of last K rows whose total time covers `intVolMinutes`. Each row
     // represents `bucketSize` minutes, so K = ceil(intVolMinutes / bucketSize),
     // capped to history length.
@@ -1354,10 +1357,10 @@ const StockColumn = ({
                         scrolled out of the regular window, "rescued" so they
                         stay visible. Older pinned rows sit at the bottom.
                         Free plan: no pinned consensus rows. */}
-                    {(isPro ? pinnedRows : []).length > 0 && (
+                    {visiblePinnedRows.length > 0 && (
                         <div className="flex-shrink-0 border-t-2 border-amber-500/40 bg-black/40">
                             <AnimatePresence initial={false} mode="popLayout">
-                                {(isPro ? pinnedRows : []).map((row) => {
+                                {visiblePinnedRows.map((row) => {
                                     const hot = (row.delta || 0) >= FLOW_THRESHOLD;
                                     return (
                                         <MinuteRow
