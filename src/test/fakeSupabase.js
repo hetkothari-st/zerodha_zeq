@@ -3,9 +3,12 @@ import { vi } from 'vitest';
 // Minimal stand-in for the supabase-js client surface AuthProvider uses.
 // `currentSessionId` is what a `select('current_session_id')` on profiles returns (the
 // account's claimed session); `sessionCheckError` makes that lookup fail.
-export function createFakeSupabase({ session = null, profile = null, profileError = null, currentSessionId = null, sessionCheckError = null } = {}) {
+// An email-link verifyOtp({ token_hash, type }) behaves like auth-js: with `otpSession` it
+// adopts that session and fires PASSWORD_RECOVERY (for type 'recovery'); with `otpError`
+// it returns that error and no session.
+export function createFakeSupabase({ session = null, profile = null, profileError = null, currentSessionId = null, sessionCheckError = null, otpSession = null, otpError = null } = {}) {
     let listener = null;
-    const state = { session, profile, profileError, currentSessionId, sessionCheckError };
+    const state = { session, profile, profileError, currentSessionId, sessionCheckError, otpSession, otpError };
     const ok = (data = {}) => Promise.resolve({ data, error: null });
     const client = {
         state,
@@ -18,7 +21,13 @@ export function createFakeSupabase({ session = null, profile = null, profileErro
             signUp: vi.fn(() => ok()),
             resend: vi.fn(() => ok()),
             signInWithOtp: vi.fn(() => ok()),
-            verifyOtp: vi.fn(() => ok()),
+            verifyOtp: vi.fn((params = {}) => {
+                if (!params.token_hash) return ok();
+                if (state.otpError) return Promise.resolve({ data: { user: null, session: null }, error: state.otpError });
+                const s = state.otpSession;
+                if (s) client.emit(params.type === 'recovery' ? 'PASSWORD_RECOVERY' : 'SIGNED_IN', s);
+                return ok({ user: s?.user ?? null, session: s });
+            }),
             updateUser: vi.fn(() => ok()),
             refreshSession: vi.fn(() => ok({ session: state.session })),
             resetPasswordForEmail: vi.fn(() => ok()),

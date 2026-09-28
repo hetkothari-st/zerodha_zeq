@@ -28,6 +28,39 @@ function readLinkError() {
     return linkErrorFrom(window.location.hash.replace(/^#/, '')) || linkErrorFrom(window.location.search.replace(/^\?/, ''));
 }
 
+// Set-password / reset emails link to /reset-password?token_hash=…&type=recovery. The app's
+// client uses the PKCE flow, which can't consume the implicit-flow links a server-sent
+// recovery email would otherwise carry, so the token hash is verified here instead.
+function readRecoveryLink() {
+    if (typeof window === 'undefined' || window.location.pathname !== '/reset-password') return null;
+    const params = new URLSearchParams(window.location.search);
+    const tokenHash = params.get('token_hash');
+    return tokenHash && params.get('type') === 'recovery' ? tokenHash : null;
+}
+
+function removeRecoveryParams() {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('token_hash');
+    url.searchParams.delete('type');
+    window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+}
+
+// One verification per client + token: a token hash works only once, so a re-run of the
+// startup effect (e.g. React StrictMode) must reuse the first attempt, not burn the link.
+const recoveryVerifications = new WeakMap();
+function verifyRecoveryOnce(client, tokenHash) {
+    let byToken = recoveryVerifications.get(client);
+    if (!byToken) { byToken = new Map(); recoveryVerifications.set(client, byToken); }
+    if (!byToken.has(tokenHash)) {
+        byToken.set(tokenHash, Promise.resolve()
+            .then(() => client.auth.verifyOtp({ token_hash: tokenHash, type: 'recovery' }))
+            .catch((e) => ({ data: null, error: e || {} })));
+    }
+    return byToken.get(tokenHash);
+}
+
+const EXPIRED_LINK_DESCRIPTION = 'Email link is invalid or has expired';
+
 const result = (error) => ({ error: friendlyError(error), code: error?.code ?? null });
 
 export function AuthProvider({ children, client: clientProp }) {
@@ -50,6 +83,7 @@ export function AuthProvider({ children, client: clientProp }) {
     const [claimError, setClaimError] = useState(false);
     const sessionRef = useRef(null);
     const claimingRef = useRef(false);
+    const claimingSidRef = useRef(null);
     const origin = typeof window !== 'undefined' ? window.location.origin : '';
 
     const adoptSession = useCallback((s) => {
@@ -68,6 +102,8 @@ export function AuthProvider({ children, client: clientProp }) {
         let claimed = null;
         try { claimed = localStorage.getItem(CLAIMED_KEY); } catch {}
         if (claimed === sid) return;
+        if (claimingSidRef.current === sid) return; // this session's claim is already in flight
+        claimingSidRef.current = sid;
         claimingRef.current = true;
         setClaiming(true);
         setClaimError(false);
@@ -87,6 +123,7 @@ export function AuthProvider({ children, client: clientProp }) {
         } catch {
             // signOut of the other devices failed; the claim itself stands.
         } finally {
+            claimingSidRef.current = null;
             claimingRef.current = false;
             setClaiming(false);
         }
@@ -114,18 +151,6 @@ export function AuthProvider({ children, client: clientProp }) {
         // once that happens the event is the source of truth, so don't let a late, stale
         // getSession() result stomp a newer session.
         let authEventSeen = false;
-        client.auth.getSession()
-            .then(({ data, error }) => {
-                if (!active) return;
-                if (error) { setStartupError(true); setLoading(false); return; }
-                if (!authEventSeen) adoptSession(data.session);
-                setLoading(false);
-            })
-            .catch(() => {
-                if (!active) return;
-                setStartupError(true);
-                setLoading(false);
-            });
         const { data: sub } = client.auth.onAuthStateChange((event, s) => {
             authEventSeen = true;
             adoptSession(s);
@@ -133,6 +158,39 @@ export function AuthProvider({ children, client: clientProp }) {
             if ((event === 'SIGNED_IN' || event === 'PASSWORD_RECOVERY') && s) claimIfNew(s);
             if (event === 'SIGNED_OUT') { setProfile(null); setDisplaced(false); setRecovery(false); setClaimError(false); }
         });
+        // A set-password link is verified first (loading stays true meanwhile), then the
+        // usual getSession snapshot runs, so the order is always the same.
+        const verifyRecoveryLink = async (tokenHash) => {
+            const { data, error } = await verifyRecoveryOnce(client, tokenHash);
+            if (!active) return;
+            removeRecoveryParams(); // a token hash works once; don't retry it on reload
+            const s = data?.session ?? null;
+            if (error || !s) {
+                setLinkError({ code: error?.code || 'otp_expired', description: error?.message || EXPIRED_LINK_DESCRIPTION });
+                return;
+            }
+            authEventSeen = true;
+            adoptSession(s);
+            setRecovery(true);
+            claimIfNew(s);
+        };
+        const startup = async () => {
+            const tokenHash = readRecoveryLink();
+            if (tokenHash) await verifyRecoveryLink(tokenHash);
+            if (!active) return;
+            try {
+                const { data, error } = await client.auth.getSession();
+                if (!active) return;
+                if (error) { setStartupError(true); setLoading(false); return; }
+                if (!authEventSeen) adoptSession(data.session);
+                setLoading(false);
+            } catch {
+                if (!active) return;
+                setStartupError(true);
+                setLoading(false);
+            }
+        };
+        startup();
         return () => { active = false; sub.subscription.unsubscribe(); };
     }, [client, claimIfNew, adoptSession]);
 

@@ -1,3 +1,4 @@
+import React from 'react';
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, act } from '@testing-library/react';
 import { AuthProvider, useAuth } from './AuthProvider';
@@ -358,5 +359,84 @@ describe('startup failure', () => {
         const r2 = await api.signOutHere();
         expect(r1).toEqual({ error: expect.any(String), code: 'startup_error' });
         expect(r2).toEqual({ error: expect.any(String), code: 'startup_error' });
+    });
+});
+
+describe('set-password email link (/reset-password?token_hash=…&type=recovery)', () => {
+    afterEach(() => { window.history.replaceState(null, '', '/'); });
+
+    test('verifies the token hash, shows resetPassword, claims the session and cleans the URL', async () => {
+        window.history.replaceState(null, '', '/reset-password?token_hash=abc123&type=recovery');
+        const client = createFakeSupabase({ otpSession: sessionFor('s-link') });
+        renderWith(client);
+        await waitFor(() => expect(screen.getByTestId('screen')).toHaveTextContent('resetPassword'));
+        expect(client.auth.verifyOtp).toHaveBeenCalledWith({ token_hash: 'abc123', type: 'recovery' });
+        expect(window.location.pathname).toBe('/reset-password');
+        expect(window.location.search).toBe('');
+        await waitFor(() => expect(client.rpc).toHaveBeenCalledWith('claim_session'));
+        expect(client.rpc).toHaveBeenCalledTimes(1);
+        expect(localStorage.getItem('funnel_claimed_session')).toBe('s-link');
+    });
+
+    test('stays loading until the verification resolves, and still works when no auth event fires', async () => {
+        window.history.replaceState(null, '', '/reset-password?token_hash=abc123&type=recovery');
+        const client = createFakeSupabase();
+        let resolveOtp;
+        client.auth.verifyOtp.mockImplementationOnce(() => new Promise((res) => { resolveOtp = res; }));
+        renderWith(client);
+        await act(async () => {});
+        expect(screen.getByTestId('screen')).toHaveTextContent('loading');
+        expect(client.auth.getSession).not.toHaveBeenCalled();
+        const s = sessionFor('s-quiet');
+        await act(async () => { resolveOtp({ data: { user: s.user, session: s }, error: null }); });
+        await waitFor(() => expect(screen.getByTestId('screen')).toHaveTextContent('resetPassword'));
+        await waitFor(() => expect(client.rpc).toHaveBeenCalledWith('claim_session'));
+        expect(window.location.search).toBe('');
+    });
+
+    test('an invalid or used link → linkExpired', async () => {
+        window.history.replaceState(null, '', '/reset-password?token_hash=old&type=recovery');
+        const client = createFakeSupabase({ otpError: { code: 'otp_expired', message: 'Email link is invalid or has expired' } });
+        let api;
+        function Grab() { api = useAuth(); return <Probe />; }
+        render(<AuthProvider client={client}><Grab /></AuthProvider>);
+        await waitFor(() => expect(screen.getByTestId('screen')).toHaveTextContent('linkExpired'));
+        expect(api.linkError).toEqual({ code: 'otp_expired', description: 'Email link is invalid or has expired' });
+        expect(api.recovery).toBe(false);
+    });
+
+    test('an error without a code still shows linkExpired (code otp_expired)', async () => {
+        window.history.replaceState(null, '', '/reset-password?token_hash=old&type=recovery');
+        const client = createFakeSupabase();
+        client.auth.verifyOtp.mockRejectedValueOnce(new Error('network down'));
+        let api;
+        function Grab() { api = useAuth(); return <Probe />; }
+        render(<AuthProvider client={client}><Grab /></AuthProvider>);
+        await waitFor(() => expect(screen.getByTestId('screen')).toHaveTextContent('linkExpired'));
+        expect(api.linkError.code).toBe('otp_expired');
+    });
+
+    test('the link is verified only once even if the startup effect runs twice (StrictMode)', async () => {
+        window.history.replaceState(null, '', '/reset-password?token_hash=abc123&type=recovery');
+        const client = createFakeSupabase({ otpSession: sessionFor('s-strict') });
+        render(<React.StrictMode><AuthProvider client={client}><Probe /></AuthProvider></React.StrictMode>);
+        await waitFor(() => expect(screen.getByTestId('screen')).toHaveTextContent('resetPassword'));
+        expect(client.auth.verifyOtp).toHaveBeenCalledTimes(1);
+    });
+
+    test('token_hash on any other path is ignored', async () => {
+        window.history.replaceState(null, '', '/?token_hash=abc123&type=recovery');
+        const client = createFakeSupabase({ otpSession: sessionFor('s-x') });
+        renderWith(client);
+        await waitFor(() => expect(screen.getByTestId('screen')).toHaveTextContent('signIn'));
+        expect(client.auth.verifyOtp).not.toHaveBeenCalled();
+    });
+
+    test('/reset-password without type=recovery is ignored', async () => {
+        window.history.replaceState(null, '', '/reset-password?token_hash=abc123&type=signup');
+        const client = createFakeSupabase({ otpSession: sessionFor('s-y') });
+        renderWith(client);
+        await waitFor(() => expect(screen.getByTestId('screen')).toHaveTextContent('signIn'));
+        expect(client.auth.verifyOtp).not.toHaveBeenCalled();
     });
 });
