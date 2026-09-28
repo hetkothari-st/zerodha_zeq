@@ -9,6 +9,7 @@ import {
     FLOW_THRESHOLD, DP_WINDOW, intervalPriceQty, bvcBuyFraction,
     foldFlow, emptyFlowBucket, reBucketFlow, computeFlowStats,
 } from '../lib/orderFlow';
+import { useEntitlement } from '../billing/EntitlementProvider';
 
 function cn(...inputs) {
     return twMerge(clsx(inputs));
@@ -1139,6 +1140,7 @@ const StockColumn = ({
     onOpenFlow,
 }) => {
     const forceUnit = useContext(VolumeUnitContext);
+    const { isPro } = useEntitlement();
     const visible = useMemo(() => history.slice(-250), [history]);
     const reversed = useMemo(() => [...visible].reverse(), [visible]);
     const dragControls = useDragControls();
@@ -1350,11 +1352,12 @@ const StockColumn = ({
                     {/* Pinned consensus rows — anchored at the bottom of the
                         values area. These are consensus minutes that have
                         scrolled out of the regular window, "rescued" so they
-                        stay visible. Older pinned rows sit at the bottom. */}
-                    {pinnedRows.length > 0 && (
+                        stay visible. Older pinned rows sit at the bottom.
+                        Free plan: no pinned consensus rows. */}
+                    {(isPro ? pinnedRows : []).length > 0 && (
                         <div className="flex-shrink-0 border-t-2 border-amber-500/40 bg-black/40">
                             <AnimatePresence initial={false} mode="popLayout">
-                                {pinnedRows.map((row) => {
+                                {(isPro ? pinnedRows : []).map((row) => {
                                     const hot = (row.delta || 0) >= FLOW_THRESHOLD;
                                     return (
                                         <MinuteRow

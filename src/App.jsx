@@ -8,9 +8,28 @@ import { twMerge } from 'tailwind-merge';
 import stocksData from './stocks_nsecm.json';
 import contractsData from './contracts_nsefo.json';
 import { useAuth } from './auth/AuthProvider';
+import { useEntitlement } from './billing/EntitlementProvider';
+import { ProBadge, useProAction } from './billing/ProGate';
+import PlanChip from './billing/PlanChip';
+import BillingBanner from './billing/BillingBanner';
+import { eqFreeView } from './billing/eqFreeView';
 
 function cn(...inputs) {
     return twMerge(clsx(inputs));
+}
+
+// Renders as a plain div when unlocked, or a button that opens the upgrade
+// modal when locked — used to wrap Pro-only filters (Timeframe, Vol Unit)
+// whose inner <select> is `disabled` and would otherwise swallow clicks.
+function GatedFilter({ isLocked, onUnlock, className, children }) {
+    if (isLocked) {
+        return (
+            <button type="button" onClick={onUnlock} className={className}>
+                {children}
+            </button>
+        );
+    }
+    return <div className={className}>{children}</div>;
 }
 
 // Default stocks already shown in the columns. Listed here so the dropdown can
@@ -122,6 +141,7 @@ const App = () => {
 
 const AuthedApp = ({ user, logout }) => {
     const auth = useAuth();
+    const { isPro, openUpgrade } = useEntitlement();
 
     const [debugLogs, setDebugLogs] = useState([]);
 
@@ -197,17 +217,43 @@ const AuthedApp = ({ user, logout }) => {
         try { localStorage.setItem('mt_bucket_size_by_monitor_v1', JSON.stringify(bucketSizeByMonitor)); } catch {}
     }, [bucketSizeByMonitor]);
 
-    // Derived: the active monitor's per-monitor settings (used by top bar).
-    const activeExtraStocks = extraStocksByMonitor[activeMonitorId] || [];
-    const activeBucketSize = bucketSizeByMonitor[activeMonitorId] || 1;
+    // ---------- Volume display unit (auto/K/L/Cr) ----------
+    const [volumeUnit, setVolumeUnit] = useState(() => {
+        try {
+            const saved = JSON.parse(localStorage.getItem('vl_volume_unit') || '"auto"');
+            return VOLUME_UNIT_OPTIONS.some(o => o.value === saved) ? saved : 'auto';
+        } catch { return 'auto'; }
+    });
+    useEffect(() => {
+        try { localStorage.setItem('vl_volume_unit', JSON.stringify(volumeUnit)); } catch {}
+    }, [volumeUnit]);
+
+    // Plan-gated view of the monitors/settings above. `activeMonitorId` is
+    // restored verbatim from localStorage and may point at a monitor hidden
+    // from a Free (or lapsed-Pro) user — every read/write about the
+    // DISPLAYED monitor must go through `view.activeId`, never the raw
+    // `activeMonitorId`, so a Free user can never touch a hidden monitor's
+    // state. Saved state itself is never deleted, so upgrading restores it.
+    const view = eqFreeView({
+        isPro,
+        monitors,
+        activeMonitorId,
+        bucketSizes: bucketSizeByMonitor,
+        extraStocks: extraStocksByMonitor,
+        volumeUnit,
+    });
+
+    // Derived: the active (displayed) monitor's per-monitor settings (used by top bar).
+    const activeExtraStocks = view.extraFor(view.activeId);
+    const activeBucketSize = view.bucketFor(view.activeId);
 
     const handleAddExtraStockToActive = (symbol) => {
         if (!symbol) return;
         if (DEFAULT_SYMBOLS.has(symbol)) return;
         setExtraStocksByMonitor(prev => {
-            const list = prev[activeMonitorId] || [];
+            const list = prev[view.activeId] || [];
             if (list.some(e => e.symbol === symbol)) return prev;
-            return { ...prev, [activeMonitorId]: [...list, { symbol }] };
+            return { ...prev, [view.activeId]: [...list, { symbol }] };
         });
     };
     const handleRemoveExtraStockFromMonitor = (monitorId, symbol) => {
@@ -217,7 +263,7 @@ const AuthedApp = ({ user, logout }) => {
         }));
     };
     const handleSetBucketSizeForActive = (size) => {
-        setBucketSizeByMonitor(prev => ({ ...prev, [activeMonitorId]: size }));
+        setBucketSizeByMonitor(prev => ({ ...prev, [view.activeId]: size }));
     };
 
     const handleAddMonitor = () => {
@@ -227,6 +273,7 @@ const AuthedApp = ({ user, logout }) => {
         setBucketSizeByMonitor(prev => ({ ...prev, [newId]: 1 }));
         setActiveMonitorId(newId);
     };
+    const addMonitor = useProAction(handleAddMonitor);
 
     const handleRemoveMonitor = (id) => {
         if (monitors.length <= 1) return;
@@ -284,9 +331,9 @@ const AuthedApp = ({ user, logout }) => {
     const { status, depthData, subscribe } = useMarketData(isWsEnabled, handleRawMessage, handleDepthPacket, { accessToken: auth.accessToken, onSignedInElsewhere: auth.markDisplaced });
 
     const handleClearAll = () => {
-        // Monitor-scoped clear — only the ACTIVE monitor gets wiped.
+        // Monitor-scoped clear — only the DISPLAYED monitor gets wiped.
         window.dispatchEvent(new CustomEvent('vl-clear', {
-            detail: { monitorId: activeMonitorId },
+            detail: { monitorId: view.activeId },
         }));
     };
 
@@ -372,7 +419,9 @@ const AuthedApp = ({ user, logout }) => {
     useEffect(() => {
         const union = [];
         const seen = new Set();
-        for (const list of Object.values(extraStocksByMonitor)) {
+        // Free users get no extra stocks anywhere — not rendered, not
+        // subscribed, not fed into this union.
+        for (const list of Object.values(isPro ? extraStocksByMonitor : {})) {
             for (const es of (list || [])) {
                 if (!seen.has(es.symbol)) {
                     seen.add(es.symbol);
@@ -381,7 +430,7 @@ const AuthedApp = ({ user, logout }) => {
             }
         }
         extraStocksRef.current = union;
-    }, [extraStocksByMonitor]);
+    }, [extraStocksByMonitor, isPro]);
 
     // Per-token mutable demo state stays in a ref so accumulated TTQ persists
     // across renders (and we can add tokens on-the-fly when extras get added).
@@ -753,17 +802,6 @@ const AuthedApp = ({ user, logout }) => {
         return niftySymbolsAvailable.filter(s => !exclude.has(s) && (!q || s.includes(q)));
     }, [niftySymbolsAvailable, search, activeExtraStocks]);
 
-    // ---------- Volume display unit (auto/K/L/Cr) ----------
-    const [volumeUnit, setVolumeUnit] = useState(() => {
-        try {
-            const saved = JSON.parse(localStorage.getItem('vl_volume_unit') || '"auto"');
-            return VOLUME_UNIT_OPTIONS.some(o => o.value === saved) ? saved : 'auto';
-        } catch { return 'auto'; }
-    });
-    useEffect(() => {
-        try { localStorage.setItem('vl_volume_unit', JSON.stringify(volumeUnit)); } catch {}
-    }, [volumeUnit]);
-
     return (
         <div className="min-h-screen bg-[#050505] text-white flex flex-col h-screen overflow-hidden font-sans selection:bg-blue-500/30">
 
@@ -826,13 +864,21 @@ const AuthedApp = ({ user, logout }) => {
                     </div>
                 </div>
 
-                {/* Timeframe filter (per active monitor) */}
-                <div className="flex items-center gap-1.5 bg-white/[0.04] border border-white/10 rounded px-2 h-8 ml-3">
+                {/* Timeframe filter (per active monitor) — Pro only. The
+                    <select> is `disabled` for Free, and since a disabled
+                    select swallows clicks, the whole filter is wrapped in a
+                    button that opens the upgrade modal instead. */}
+                <GatedFilter
+                    isLocked={!isPro}
+                    onUnlock={openUpgrade}
+                    className="flex items-center gap-1.5 bg-white/[0.04] border border-white/10 rounded px-2 h-8 ml-3"
+                >
                     <span className="text-[9px] font-black text-white/40 uppercase tracking-wider">Timeframe Filters</span>
                     <select
                         value={activeBucketSize}
                         onChange={(e) => handleSetBucketSizeForActive(Number(e.target.value))}
-                        className="bg-transparent text-[12px] font-black text-emerald-300 font-mono tabular-nums focus:outline-none cursor-pointer"
+                        disabled={!isPro}
+                        className="bg-transparent text-[12px] font-black text-emerald-300 font-mono tabular-nums focus:outline-none cursor-pointer disabled:cursor-not-allowed"
                     >
                         {BUCKET_OPTIONS.map(o => (
                             <option key={o.value} value={o.value} className="bg-[#0a0a0e] text-emerald-300">
@@ -840,15 +886,21 @@ const AuthedApp = ({ user, logout }) => {
                             </option>
                         ))}
                     </select>
-                </div>
+                    {!isPro && <ProBadge className="ml-1" />}
+                </GatedFilter>
 
-                {/* Volume unit filter */}
-                <div className="flex items-center gap-1.5 bg-white/[0.04] border border-white/10 rounded px-2 h-8">
+                {/* Volume unit filter — Pro only, same gating pattern. */}
+                <GatedFilter
+                    isLocked={!isPro}
+                    onUnlock={openUpgrade}
+                    className="flex items-center gap-1.5 bg-white/[0.04] border border-white/10 rounded px-2 h-8"
+                >
                     <span className="text-[9px] font-black text-white/40 uppercase tracking-wider">Vol Unit</span>
                     <select
-                        value={volumeUnit}
+                        value={view.volumeUnit}
                         onChange={(e) => setVolumeUnit(e.target.value)}
-                        className="bg-transparent text-[12px] font-black text-violet-300 font-mono tabular-nums focus:outline-none cursor-pointer"
+                        disabled={!isPro}
+                        className="bg-transparent text-[12px] font-black text-violet-300 font-mono tabular-nums focus:outline-none cursor-pointer disabled:cursor-not-allowed"
                     >
                         {VOLUME_UNIT_OPTIONS.map(o => (
                             <option key={o.value} value={o.value} className="bg-[#0a0a0e] text-violet-300">
@@ -856,7 +908,8 @@ const AuthedApp = ({ user, logout }) => {
                             </option>
                         ))}
                     </select>
-                </div>
+                    {!isPro && <ProBadge className="ml-1" />}
+                </GatedFilter>
 
                 {/* Add Stock has moved to the monitor tab bar below. */}
 
@@ -934,6 +987,7 @@ const AuthedApp = ({ user, logout }) => {
                         <span className="text-[10px] font-bold text-white/60 max-w-[110px] truncate" title={user.email}>
                             {user.name || user.email}
                         </span>
+                        <PlanChip />
                         {auth.profile?.role === 'admin' && <a href="/admin" className="text-[10px] font-bold text-emerald-400 hover:underline">Admin</a>}
                         <button
                             onClick={logout}
@@ -946,24 +1000,29 @@ const AuthedApp = ({ user, logout }) => {
                 </div>
             </header>
 
+            <BillingBanner />
+
             {/* --- MONITOR TAB BAR --- */}
             <div className="relative flex items-center gap-1 px-4 py-1 border-b border-white/10 bg-[#0a0a0e] flex-shrink-0 overflow-x-auto scrollbar-thin [&::-webkit-scrollbar]:h-1">
                 <span className="text-[9px] font-black text-white/30 uppercase tracking-wider mr-2 flex-shrink-0">
                     Monitors
                 </span>
-                {monitors.map((m, idx) => (
+                {view.monitors.map((m, idx) => (
                     <button
                         key={m.id}
                         onClick={() => setActiveMonitorId(m.id)}
                         className={cn(
                             "flex items-center gap-1 px-3 py-1 rounded text-[11px] font-bold transition-colors h-7 flex-shrink-0 group",
-                            activeMonitorId === m.id
+                            view.activeId === m.id
                                 ? "bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 shadow-[0_0_8px_rgba(52,211,153,0.15)]"
                                 : "bg-white/[0.04] border border-white/10 text-white/50 hover:bg-white/[0.08] hover:text-white/80"
                         )}
                     >
                         <span>Monitor {idx + 1}</span>
-                        {monitors.length > 1 && (
+                        {/* Free users can never remove a monitor — saved state
+                            (other hidden monitors) must never be deleted, so
+                            upgrading restores it. */}
+                        {isPro && monitors.length > 1 && (
                             <span
                                 role="button"
                                 onClick={(e) => {
@@ -979,11 +1038,11 @@ const AuthedApp = ({ user, logout }) => {
                     </button>
                 ))}
                 <button
-                    onClick={handleAddMonitor}
+                    onClick={addMonitor}
                     className="flex items-center gap-1 px-2 py-1 rounded border border-dashed border-white/15 text-white/40 hover:text-white hover:bg-white/5 text-[11px] font-bold h-7 flex-shrink-0"
                     title="Add a new monitor session"
                 >
-                    <Plus size={11} /> Add Monitor
+                    <Plus size={11} /> Add Monitor {!isPro && <ProBadge className="ml-1" />}
                 </button>
 
                 {/* ---------- ATM WIDGET (center of the monitor bar) ----------
@@ -1014,10 +1073,10 @@ const AuthedApp = ({ user, logout }) => {
                 <div className="ml-auto flex-shrink-0">
                     <button
                         ref={anchorRef}
-                        onClick={() => setDropdownOpen(o => !o)}
+                        onClick={isPro ? () => setDropdownOpen(o => !o) : openUpgrade}
                         className="flex items-center gap-1.5 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 text-blue-300 font-bold py-1 px-3 rounded text-[11px] uppercase tracking-wider h-7"
                     >
-                        <Plus size={11} /> Add Stock
+                        <Plus size={11} /> Add Stock {!isPro && <ProBadge className="ml-1" />}
                     </button>
                 </div>
 
@@ -1074,7 +1133,7 @@ const AuthedApp = ({ user, logout }) => {
                                     {activeExtraStocks.map(es => (
                                         <button
                                             key={es.symbol}
-                                            onClick={() => handleRemoveExtraStockFromMonitor(activeMonitorId, es.symbol)}
+                                            onClick={() => handleRemoveExtraStockFromMonitor(view.activeId, es.symbol)}
                                             className="flex items-center gap-1 bg-white/5 hover:bg-red-500/15 border border-white/10 hover:border-red-500/30 rounded px-1.5 py-0.5 text-[10px] text-white/70 hover:text-red-300 font-mono"
                                             title="Remove"
                                         >
@@ -1095,11 +1154,11 @@ const AuthedApp = ({ user, logout }) => {
                 is visible. MonitorDashboard already handles display via its
                 own `isActive` prop (toggles between flex and hidden). */}
             <main className="flex-1 relative overflow-hidden bg-[#050505] p-3 min-h-0">
-                {monitors.map(m => (
+                {view.monitors.map(m => (
                     <MonitorDashboard
                         key={m.id}
                         id={m.id}
-                        isActive={m.id === activeMonitorId}
+                        isActive={m.id === view.activeId}
                         depthData={effectiveDepth}
                         status={status}
                         subscribe={subscribe}
@@ -1111,10 +1170,10 @@ const AuthedApp = ({ user, logout }) => {
                         depthEvents={depthEvents.current}
                         isSidebarVisible={false}
                         onToggleSidebar={() => {}}
-                        extraStocks={extraStocksByMonitor[m.id] || []}
+                        extraStocks={view.extraFor(m.id)}
                         onRemoveExtraStock={(sym) => handleRemoveExtraStockFromMonitor(m.id, sym)}
-                        bucketSize={bucketSizeByMonitor[m.id] || 1}
-                        volumeUnit={volumeUnit}
+                        bucketSize={view.bucketFor(m.id)}
+                        volumeUnit={view.volumeUnit}
                         monitorId={m.id}
                         marketOpen={marketOpen}
                     />
