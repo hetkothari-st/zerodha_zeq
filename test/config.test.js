@@ -39,3 +39,13 @@ test('loadConfig reads PORT and optional values', () => {
     assert.equal(c.hubUrl, 'http://ws-hub.railway.internal:8765');
     assert.equal(c.hubPublicUrl, 'wss://hub.example');
 });
+
+test('billing is enabled only when all four Razorpay vars are set', () => {
+    const billingBase = { SUPABASE_URL: 'https://p.supabase.co', SUPABASE_SERVICE_KEY: 'svc', APP_ORIGIN: 'https://a.test', HUB_SHARED_SECRET: 'h' };
+    const off = loadConfig({ ...billingBase, RAZORPAY_KEY_ID: 'k', RAZORPAY_KEY_SECRET: 's', RAZORPAY_WEBHOOK_SECRET: 'w' }, { defaultPort: 1 });
+    assert.equal(off.billingEnabled, false);
+    const on = loadConfig({ ...billingBase, RAZORPAY_KEY_ID: 'k', RAZORPAY_KEY_SECRET: 's', RAZORPAY_WEBHOOK_SECRET: 'w', RAZORPAY_PLAN_ID: 'plan_1', PRO_PRICE_LABEL: '₹499/month' }, { defaultPort: 1 });
+    assert.equal(on.billingEnabled, true);
+    assert.equal(on.razorpayPlanId, 'plan_1');
+    assert.equal(on.proPriceLabel, '₹499/month');
+});

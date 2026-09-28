@@ -13,11 +13,12 @@ export function createApp({ config, distDir, routers }) {
         contentSecurityPolicy: {
             directives: {
                 defaultSrc: ["'self'"],
-                scriptSrc: ["'self'"],
+                scriptSrc: ["'self'", 'https://checkout.razorpay.com'],
                 styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
                 fontSrc: ["'self'", 'https://fonts.gstatic.com'],
-                imgSrc: ["'self'", 'data:', 'https://*.googleusercontent.com'], // Google avatars are served from lh3/lh4/… hosts
-                connectSrc: ["'self'", config.supabaseUrl, config.supabaseUrl.replace(/^http/, 'ws'), ...(config.hubPublicUrl ? [config.hubPublicUrl] : [])],
+                imgSrc: ["'self'", 'data:', 'https://*.googleusercontent.com', 'https://cdn.razorpay.com'], // Google avatars are served from lh3/lh4/… hosts
+                connectSrc: ["'self'", config.supabaseUrl, config.supabaseUrl.replace(/^http/, 'ws'), 'https://api.razorpay.com', 'https://lumberjack.razorpay.com', ...(config.hubPublicUrl ? [config.hubPublicUrl] : [])],
+                frameSrc: ['https://api.razorpay.com', 'https://checkout.razorpay.com'],
                 frameAncestors: ["'none'"],
                 formAction: ["'self'"],
             },
@@ -25,15 +26,20 @@ export function createApp({ config, distDir, routers }) {
         crossOriginEmbedderPolicy: false,
     }));
 
+    const WEBHOOK_PATH = '/api/billing/webhook';
     const limiter = (limit) => rateLimit({
         windowMs: 60_000,
         limit,
         standardHeaders: 'draft-7',
         legacyHeaders: false,
+        // Razorpay retries from a few IPs; its signature check is the gate, not a rate limit.
+        skip: (req) => req.originalUrl.split('?')[0] === WEBHOOK_PATH,
         handler: (req, res) => sendError(res, 'rate_limited'),
     });
     app.use('/api/admin', limiter(20));
     app.use('/api', limiter(60));
+    // The webhook signature is computed over the exact bytes, so keep them raw.
+    app.use(WEBHOOK_PATH, express.raw({ type: '*/*', limit: '100kb' }));
     app.use(express.json({ limit: '10kb' }));
 
     for (const router of routers) app.use(router);

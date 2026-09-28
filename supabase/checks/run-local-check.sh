@@ -62,4 +62,6 @@ done
 
 run_sql_file "check script (auth_profiles_check.sql)" "$CHECK_SQL"
 
+run_sql_file "check script (billing_check.sql)" "$SCRIPT_DIR/billing_check.sql"
+
 echo "==> All steps completed successfully"

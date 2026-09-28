@@ -22,5 +22,12 @@ export function loadConfig(env, { defaultPort }) {
         // Mobile OTP verification is on hold during development until SMS/DLT is live.
         // Set REQUIRE_MOBILE=true to require a verified phone before admin approval again.
         requireMobile: env.REQUIRE_MOBILE === 'true',
+        razorpayKeyId: env.RAZORPAY_KEY_ID || '',
+        razorpayKeySecret: env.RAZORPAY_KEY_SECRET || '',
+        razorpayWebhookSecret: env.RAZORPAY_WEBHOOK_SECRET || '',
+        razorpayPlanId: env.RAZORPAY_PLAN_ID || '',
+        proPriceLabel: env.PRO_PRICE_LABEL || '',
+        // Payments stay off (routes 404, everything unlocked) until every Razorpay value is set.
+        billingEnabled: Boolean(env.RAZORPAY_KEY_ID && env.RAZORPAY_KEY_SECRET && env.RAZORPAY_WEBHOOK_SECRET && env.RAZORPAY_PLAN_ID),
     };
 }

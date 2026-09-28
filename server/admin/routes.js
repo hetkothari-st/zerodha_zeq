@@ -56,5 +56,26 @@ export function createAdminRouter({ auth, profileAdmin, profiles, notifier, requ
         }));
     }
 
+    for (const [action, value] of [['grant_comp', true], ['revoke_comp', false]]) {
+        router.post(`/api/admin/users/:id/${action}`, ...auth.requireAdmin, wrap(async (req, res) => {
+            const { id } = req.params;
+            if (!UUID.test(id)) return sendError(res, 'bad_request', 'Invalid user id.');
+            let updated;
+            try {
+                updated = await profileAdmin.setCompPro(id, value);
+            } catch (err) {
+                console.error(`[admin] ${action} failed:`, err.message);
+                return sendError(res, 'auth_unavailable');
+            }
+            if (!updated) return sendError(res, 'not_found', 'No such user.');
+            try {
+                await profileAdmin.audit(req.auth.userId, id, action);
+            } catch (err) {
+                console.error(`[admin] audit write failed for ${action} ${id}:`, err.message);
+            }
+            res.json({ ok: true, user: updated });
+        }));
+    }
+
     return router;
 }

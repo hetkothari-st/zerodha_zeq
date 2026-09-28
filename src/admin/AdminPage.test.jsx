@@ -148,6 +148,36 @@ test('tabs show a count per status and the table scrolls horizontally', async ()
     expect(container.querySelector('table').parentElement).toHaveClass('overflow-x-auto');
 });
 
+test('shows plan and toggles complimentary Pro', async () => {
+    const asha = { id: 'u-1', full_name: 'Asha', email: 'asha@x.in', status: 'pending', signup_provider: 'email', created_at: '2026-09-28T00:00:00Z', comp_pro: false, role: 'user', subscriptions: [] };
+    auth.apiFetch = makeApi({ 'GET /api/admin/users?status=pending': { ok: true, status: 200, data: { users: [asha] } } });
+    render(<AdminPage />);
+    await screen.findByText('Asha');
+    expect(screen.getByText('Free')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Give Asha complimentary Pro' }));
+    expect(auth.apiFetch).toHaveBeenCalledWith('/api/admin/users/u-1/grant_comp', { method: 'POST' });
+
+    const compAsha = { ...asha, comp_pro: true };
+    auth.apiFetch = makeApi({ 'GET /api/admin/users?status=pending': { ok: true, status: 200, data: { users: [compAsha] } } });
+    render(<AdminPage />);
+    await screen.findByText('Asha');
+    expect(screen.getByText('Comp')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Remove complimentary Pro from Asha' }));
+    expect(auth.apiFetch).toHaveBeenCalledWith('/api/admin/users/u-1/revoke_comp', { method: 'POST' });
+});
+
+test('filters the list by email', async () => {
+    const asha = { id: 'u-1', full_name: 'Asha', email: 'asha@x.in', status: 'pending', signup_provider: 'email', created_at: '2026-09-28T00:00:00Z', comp_pro: false, role: 'user', subscriptions: [] };
+    const ravi = { id: 'u-2', full_name: 'Ravi', email: 'ravi@x.in', status: 'pending', signup_provider: 'email', created_at: '2026-09-28T00:00:00Z', comp_pro: false, role: 'user', subscriptions: [] };
+    auth.apiFetch = makeApi({ 'GET /api/admin/users?status=pending': { ok: true, status: 200, data: { users: [asha, ravi] } } });
+    render(<AdminPage />);
+    await screen.findByText('Asha');
+    expect(screen.getByText('Ravi')).toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText('Find by email'), 'ravi');
+    expect(screen.queryByText('Asha')).not.toBeInTheDocument();
+    expect(screen.getByText('Ravi')).toBeInTheDocument();
+});
+
 test('counts refresh after an approval', async () => {
     let pending = [pendingUser];
     const approved = [];

@@ -1,4 +1,4 @@
-const LIST_FIELDS = 'id,full_name,email,phone,status,role,signup_provider,created_at,approved_at';
+const LIST_FIELDS = 'id,full_name,email,phone,status,role,signup_provider,created_at,approved_at,comp_pro,subscriptions(status,current_end)';
 
 // Service-key access to profiles/admin_audit_log via PostgREST (bypasses RLS: server only).
 export function createProfileAdmin({ supabaseUrl, serviceKey, fetchImpl = fetch }) {
@@ -34,6 +34,14 @@ export function createProfileAdmin({ supabaseUrl, serviceKey, fetchImpl = fetch 
                 headers: { Prefer: 'return=minimal' },
                 body: JSON.stringify({ admin_id: adminId, target_id: targetId, action }),
             });
+        },
+        async setCompPro(id, value) {
+            const rows = await call(`profiles?id=eq.${id}`, {
+                method: 'PATCH',
+                headers: { Prefer: 'return=representation' },
+                body: JSON.stringify({ comp_pro: Boolean(value) }),
+            });
+            return rows?.[0] ?? null;
         },
     };
 }

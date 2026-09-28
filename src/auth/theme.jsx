@@ -12,6 +12,8 @@ export const theme = {
     productName: 'Funnel Eq',
     tagline: 'Track every move on your watchlist.',
     Wordmark,
+    accent: '#059669',
+    proFeatures: ['Add any stock beyond the NIFTY-50', 'All timeframes from 15s to 60m', 'Multiple monitors', 'Consensus pinned rows', 'Volume unit filter'],
     classes: {
         page: "min-h-screen flex flex-col min-[900px]:flex-row bg-[#f7f6f2] text-gray-900 font-['Inter',sans-serif]",
         panel: 'relative h-44 shrink-0 overflow-hidden border-b border-[#ecebe6] min-[900px]:h-auto min-[900px]:flex-[1.3] min-[900px]:border-b-0 min-[900px]:border-r',

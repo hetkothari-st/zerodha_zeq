@@ -6,6 +6,7 @@ vi.mock('./theme', () => ({
     theme: { productName: 'Funnel Test', tagline: 't', Wordmark: () => <span>WM</span>, classes: new Proxy({}, { get: () => '' }) },
 }));
 vi.mock('./panels/MarketPanel', () => ({ default: () => <div data-testid="panel" /> }));
+vi.mock('../billing/EntitlementProvider', () => ({ EntitlementProvider: ({ children }) => children }));
 let auth;
 vi.mock('./AuthProvider', () => ({ useAuth: () => auth }));
 

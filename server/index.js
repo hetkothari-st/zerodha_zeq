@@ -11,10 +11,14 @@ import { createKiteRouter } from './kite/routes.js';
 import { createProfileAdmin } from './admin/profileAdmin.js';
 import { createAdminRouter } from './admin/routes.js';
 import { createNotifier } from './notify/notifier.js';
+import { createRazorpay } from './billing/razorpay.js';
+import { createBillingStore } from './billing/store.js';
+import { createBillingRouter } from './billing/routes.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const config = loadConfig(process.env, { defaultPort: 3000 });
 if (!config.hubPublicUrl) console.warn('[server] HUB_PUBLIC_URL not set — browsers will be blocked from the ws-hub by CSP');
+if (!config.billingEnabled) console.warn('[server] Razorpay not configured — billing off, all features unlocked');
 
 const profiles = createProfileStore({
     fetchProfile: supabaseProfileFetcher({ supabaseUrl: config.supabaseUrl, serviceKey: config.supabaseServiceKey }),
@@ -37,6 +41,15 @@ const app = createApp({
             notifier: createNotifier(config),
             requireMobile: config.requireMobile,
         }),
+        ...(config.billingEnabled ? [createBillingRouter({
+            auth,
+            billing: createBillingStore({ supabaseUrl: config.supabaseUrl, serviceKey: config.supabaseServiceKey }),
+            razorpay: createRazorpay({ keyId: config.razorpayKeyId, keySecret: config.razorpayKeySecret }),
+            planId: config.razorpayPlanId,
+            keyId: config.razorpayKeyId,
+            webhookSecret: config.razorpayWebhookSecret,
+            priceLabel: config.proPriceLabel,
+        })] : []),
     ],
 });
 
