@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 // Usage (dry run):  node scripts/migrate-app-users.mjs
-//        (apply):   node scripts/migrate-app-users.mjs --apply [--email-delay-ms=<n>]
+//        (apply):   node scripts/migrate-app-users.mjs --apply [--email-delay-ms=<n> | --email-delay-ms <n>]
 // Env: OLD_SUPABASE_URL, OLD_SUPABASE_SERVICE_KEY, SUPABASE_URL, SUPABASE_SERVICE_KEY, APP_ORIGIN
 // --email-delay-ms: milliseconds to wait between password-set emails (default 2500), to stay under
 //                   GoTrue's rate limit. On a 429 the script backs off using the Retry-After header
-//                   and retries up to 3 times before giving up on that one user.
+//                   and retries up to 3 times before giving up on that user; after that, the
+//                   remaining users are still created and approved but their emails are marked
+//                   failed ("email rate limited — rerun later") at once — rerun later to send them.
+//                   An invalid value prints a warning and the default is used.
 import { writeFileSync } from 'fs';
-import { createSupabaseAdmin, runMigration } from './lib/migrateUsers.js';
+import { createSupabaseAdmin, runMigration, parseArgs } from './lib/migrateUsers.js';
 
 const required = ['OLD_SUPABASE_URL', 'OLD_SUPABASE_SERVICE_KEY', 'SUPABASE_URL', 'SUPABASE_SERVICE_KEY', 'APP_ORIGIN'];
 const missing = required.filter((k) => !process.env[k]);
@@ -33,10 +36,8 @@ if (!(appOriginUrl.protocol === 'https:' || (appOriginUrl.protocol === 'http:' &
     process.exit(2);
 }
 
-const apply = process.argv.includes('--apply');
-const delayArg = process.argv.find((a) => a.startsWith('--email-delay-ms='));
-const parsedDelay = delayArg ? Number(delayArg.split('=')[1]) : NaN;
-const emailDelayMs = Number.isFinite(parsedDelay) && parsedDelay >= 0 ? parsedDelay : 2500;
+const { apply, emailDelayMs, warnings } = parseArgs(process.argv.slice(2));
+for (const w of warnings) console.warn(`Warning: ${w}`);
 
 try {
     const report = await runMigration({

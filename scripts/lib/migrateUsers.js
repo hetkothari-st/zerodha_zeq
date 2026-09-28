@@ -3,6 +3,28 @@ const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const ALREADY_REGISTERED = /already been registered/i;
 const MAX_EMAIL_RETRIES = 3;
 const DEFAULT_RETRY_AFTER_SECONDS = 60;
+const DEFAULT_EMAIL_DELAY_MS = 2500;
+const RATE_LIMITED = 'email rate limited — rerun later';
+
+// CLI flags: --apply, and --email-delay-ms=<n> or --email-delay-ms <n>. An invalid delay is
+// reported in `warnings` and the default is kept.
+export function parseArgs(argv) {
+    const warnings = [];
+    let emailDelayMs = DEFAULT_EMAIL_DELAY_MS;
+    for (let i = 0; i < argv.length; i++) {
+        const arg = argv[i];
+        let raw;
+        if (arg.startsWith('--email-delay-ms=')) raw = arg.slice('--email-delay-ms='.length);
+        else if (arg === '--email-delay-ms') {
+            const next = argv[i + 1];
+            if (next !== undefined && !next.startsWith('--')) { raw = next; i++; } else raw = '';
+        } else continue;
+        const n = raw.trim() === '' ? NaN : Number(raw);
+        if (Number.isFinite(n) && n >= 0) emailDelayMs = n;
+        else warnings.push(`Ignoring invalid --email-delay-ms value "${raw}" (must be a number of milliseconds >= 0); using ${DEFAULT_EMAIL_DELAY_MS}.`);
+    }
+    return { apply: argv.includes('--apply'), emailDelayMs, warnings };
+}
 
 export function planMigration(rows) {
     const seen = new Set();
@@ -114,7 +136,7 @@ export function createSupabaseAdmin({ url, serviceKey, fetchImpl = fetch, log = 
 
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export async function runMigration({ legacy, target, appOrigin, apply, emailDelayMs = 2500, sleep = defaultSleep, log = console }) {
+export async function runMigration({ legacy, target, appOrigin, apply, emailDelayMs = DEFAULT_EMAIL_DELAY_MS, sleep = defaultSleep, log = console }) {
     const rows = await legacy.listLegacyUsers();
     const { migrate, manual } = planMigration(rows);
     // Loaded once per run (not per user) so a rerun's classification is consistent and cheap.
@@ -135,8 +157,13 @@ export async function runMigration({ legacy, target, appOrigin, apply, emailDela
 
     const report = { dryRun: false, created: [], resent: [], skipped_exists: [], skipped_rejected: [], failed: [], manual };
     let emailsSent = 0;
+    // After one user exhausts its 429 retries, GoTrue is clearly still limiting us: stop
+    // waiting for the rest of the run and mark their emails failed at once (the users are
+    // still created and approved; a rerun sends the emails).
+    let rateLimitExhausted = false;
 
     async function sendThrottled(email, redirectTo) {
+        if (rateLimitExhausted) throw new Error(RATE_LIMITED);
         if (emailsSent > 0) await sleep(emailDelayMs);
         emailsSent++;
         for (let attempt = 0; attempt <= MAX_EMAIL_RETRIES; attempt++) {
@@ -148,7 +175,7 @@ export async function runMigration({ legacy, target, appOrigin, apply, emailDela
                     await sleep(err.retryAfter * 1000);
                     continue;
                 }
-                if (err.status === 429) throw new Error('email rate limited — rerun later');
+                if (err.status === 429) { rateLimitExhausted = true; throw new Error(RATE_LIMITED); }
                 throw err;
             }
         }

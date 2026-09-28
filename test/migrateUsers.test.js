@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { planMigration, createSupabaseAdmin, runMigration } from '../scripts/lib/migrateUsers.js';
+import { planMigration, createSupabaseAdmin, runMigration, parseArgs } from '../scripts/lib/migrateUsers.js';
 
 const noSleep = async () => {};
 
@@ -279,6 +279,70 @@ test('429s exhausted after 3 retries report failed with a rerun-later reason', a
     const r = await runMigration({ legacy, target, appOrigin: 'https://funnelop.in', apply: true, log: quiet, sleep: async (ms) => sleeps.push(ms) });
     assert.deepEqual(r.failed, [{ email: 'a@x.in', reason: 'email rate limited — rerun later' }]);
     assert.deepEqual(sleeps, [60000, 60000, 60000]);
+});
+
+test('once one user exhausts its 429 retries, later users skip the email at once (still created + approved)', async () => {
+    const { f, legacy, target } = setup({
+        legacyRows: [{ username: 'a@x.in', is_active: true }, { username: 'b@x.in', is_active: true }, { username: 'c@x.in', is_active: true }],
+        recoverFailures: { 'a@x.in': { times: 10 }, 'b@x.in': { times: 10 }, 'c@x.in': { times: 10 } },
+    });
+    const sleeps = [];
+    const r = await runMigration({ legacy, target, appOrigin: 'https://funnelop.in', apply: true, log: quiet, sleep: async (ms) => sleeps.push(ms) });
+    assert.deepEqual(r.failed, [
+        { email: 'a@x.in', reason: 'email rate limited — rerun later' },
+        { email: 'b@x.in', reason: 'email rate limited — rerun later' },
+        { email: 'c@x.in', reason: 'email rate limited — rerun later' },
+    ]);
+    assert.deepEqual(sleeps, [60000, 60000, 60000]); // no throttle wait or retries after the first give-up
+    const recovers = f.calls.filter((c) => c.path.startsWith('/auth/v1/recover'));
+    assert.equal(recovers.length, 4); // a: 1 try + 3 retries; b and c: none
+    assert.ok(recovers.every((c) => c.body.email === 'a@x.in'));
+    for (const email of ['b@x.in', 'c@x.in']) {
+        const id = f.users.get(email)?.id;
+        assert.ok(id, `${email} was created`);
+        assert.equal(f.profiles.get(id).status, 'approved');
+    }
+});
+
+test('the password-set email redirects to <APP_ORIGIN>/reset-password (the token_hash link lands there)', async () => {
+    const { f, legacy, target } = setup({ legacyRows: [{ username: 'a@x.in', is_active: true }] });
+    await runMigration({ legacy, target, appOrigin: 'https://staging.funnelop.in', apply: true, log: quiet, sleep: async () => {} });
+    const recover = f.calls.find((c) => c.path.startsWith('/auth/v1/recover'));
+    assert.equal(new URL(recover.path, 'https://x').searchParams.get('redirect_to'), 'https://staging.funnelop.in/reset-password');
+});
+
+// --- parseArgs: --apply and --email-delay-ms in both "=" and space forms ---
+
+test('parseArgs: defaults to a dry run with a 2500 ms email delay and no warnings', () => {
+    assert.deepEqual(parseArgs([]), { apply: false, emailDelayMs: 2500, warnings: [] });
+});
+
+test('parseArgs: --apply and --email-delay-ms=<n>', () => {
+    assert.deepEqual(parseArgs(['--apply', '--email-delay-ms=5000']), { apply: true, emailDelayMs: 5000, warnings: [] });
+});
+
+test('parseArgs: --email-delay-ms <n> (space form)', () => {
+    assert.deepEqual(parseArgs(['--email-delay-ms', '4000', '--apply']), { apply: true, emailDelayMs: 4000, warnings: [] });
+    assert.deepEqual(parseArgs(['--email-delay-ms', '0']), { apply: false, emailDelayMs: 0, warnings: [] });
+});
+
+test('parseArgs: an invalid or missing delay warns and keeps the default', () => {
+    for (const argv of [['--email-delay-ms=abc'], ['--email-delay-ms', '-5'], ['--email-delay-ms'], ['--email-delay-ms', '--apply'], ['--email-delay-ms=']]) {
+        const r = parseArgs(argv);
+        assert.equal(r.emailDelayMs, 2500, JSON.stringify(argv));
+        assert.equal(r.warnings.length, 1, JSON.stringify(argv));
+        assert.match(r.warnings[0], /--email-delay-ms/);
+    }
+    assert.equal(parseArgs(['--email-delay-ms', '--apply']).apply, true);
+});
+
+test('CLI prints a warning for an invalid --email-delay-ms', () => {
+    const res = spawnSync(process.execPath, [cliPath, '--email-delay-ms', 'soon'], {
+        env: { ...process.env, OLD_SUPABASE_URL: 'http://127.0.0.1:9', OLD_SUPABASE_SERVICE_KEY: 'o', SUPABASE_URL: 'http://127.0.0.1:10', SUPABASE_SERVICE_KEY: 'n', APP_ORIGIN: 'http://localhost:3000' },
+        encoding: 'utf8',
+        timeout: 10000,
+    });
+    assert.match(res.stderr, /--email-delay-ms/);
 });
 
 // --- Item 3: approve affects exactly one row; rejected/approved/missing handling ---
