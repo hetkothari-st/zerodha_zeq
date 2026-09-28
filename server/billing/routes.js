@@ -5,6 +5,9 @@ import { toRow, verifyWebhookSignature } from './razorpay.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CANCELLABLE = new Set(['authenticated', 'active', 'pending']);
+// A subscription past 'created' but not yet terminal: the user has already paid (or is mid
+// mandate) and a webhook just hasn't caught the local row up yet. Must never be expired.
+const OPEN_PROGRESSED = new Set(['authenticated', 'active', 'pending']);
 
 export function createBillingRouter({ auth, billing, razorpay, planId, keyId, webhookSecret, priceLabel = '' }) {
     const router = express.Router();
@@ -50,8 +53,27 @@ export function createBillingRouter({ auth, billing, razorpay, planId, keyId, we
                 }
                 remote = null; // 404: gone at Razorpay — stale, fall through to expire + recreate
             }
-            const stale = !remote || remote.plan_id !== planId || remote.status !== 'created';
-            if (!stale) return res.json({ subscriptionId: open.razorpay_subscription_id, keyId });
+
+            if (remote?.plan_id === planId && OPEN_PROGRESSED.has(remote.status)) {
+                // The user already paid (or is mid-mandate) and the webhook that would have
+                // caught the local row up just hasn't arrived yet: never expire this — sync it
+                // from Razorpay's copy and make the client wait, don't create a second subscription.
+                const { razorpay_subscription_id: _id, ...fields } = toRow(remote);
+                if (fields.current_end === null) delete fields.current_end;
+                try {
+                    await billing.updateSubscription(open.razorpay_subscription_id, fields);
+                } catch (err) {
+                    console.error('[billing] subscribe: syncing progressed row failed:', err.message);
+                    return sendError(res, 'auth_unavailable', 'Billing is temporarily unavailable.');
+                }
+                return sendError(res, 'conflict', 'Your subscription is being activated. Refresh in a minute.');
+            }
+
+            const reusable = remote?.plan_id === planId && remote.status === 'created';
+            if (reusable) return res.json({ subscriptionId: open.razorpay_subscription_id, keyId });
+
+            // Stale: gone at Razorpay (404), a different plan, or already terminal there
+            // (cancelled, completed, expired, halted).
             try {
                 await billing.updateSubscription(open.razorpay_subscription_id, { status: 'expired' });
             } catch (err) {

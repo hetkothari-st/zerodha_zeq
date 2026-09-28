@@ -81,6 +81,20 @@ describe('EntitlementProvider', () => {
         await waitFor(() => expect(apiFetchRef.current).toHaveBeenCalledTimes(2));
         expect(screen.getByText('pro|true|true')).toBeInTheDocument();
     });
+    it('does not schedule a retry (or fetch again) after unmount, even for a request already in flight at unmount time', async () => {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        let resolveFetch;
+        apiFetchRef.current = vi.fn(() => new Promise((resolve) => { resolveFetch = resolve; }));
+        const { unmount } = render(<EntitlementProvider><Probe /></EntitlementProvider>);
+        await waitFor(() => expect(apiFetchRef.current).toHaveBeenCalledTimes(1));
+        unmount(); // the first request is still pending (in flight) at this point
+        resolveFetch({ ok: false, status: 503, code: 'auth_unavailable' });
+        await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+        // Post-unmount, this must not have scheduled a retry timer at all.
+        await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
+        expect(apiFetchRef.current).toHaveBeenCalledTimes(1);
+        vi.useRealTimers();
+    });
     it('openUpgrade does not show the modal while loading', () => {
         apiFetchRef.current = vi.fn(() => new Promise(() => {}));
         render(<EntitlementProvider><Probe /></EntitlementProvider>);

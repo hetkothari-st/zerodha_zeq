@@ -31,13 +31,20 @@ export function EntitlementProvider({ children, pollMs = 300000 }) {
     const settledRef = useRef(false);
     const retryStepRef = useRef(0);
     const retryTimerRef = useRef(null);
+    // Bumped whenever this provider unmounts or the signed-in user changes (in the effect
+    // cleanup below, which React runs for both cases). A request that was already in flight at
+    // that point must not act on its result: no setState, and — the actual leak this guards —
+    // no scheduling a further retry via setTimeout once nothing is listening any more.
+    const requestIdRef = useRef(0);
 
     const clearRetryTimer = useCallback(() => {
         if (retryTimerRef.current) { clearTimeout(retryTimerRef.current); retryTimerRef.current = null; }
     }, []);
 
     const refresh = useCallback(async () => {
+        const requestId = requestIdRef.current;
         const r = await apiFetchRef.current('/api/billing/status');
+        if (requestIdRef.current !== requestId) return r; // unmounted or user changed mid-request
         if (r.ok) {
             settledRef.current = true;
             retryStepRef.current = 0;
@@ -73,6 +80,7 @@ export function EntitlementProvider({ children, pollMs = 300000 }) {
         const onFocus = () => refresh();
         window.addEventListener('focus', onFocus);
         return () => {
+            requestIdRef.current += 1; // invalidate any in-flight request (unmount or user change)
             clearInterval(id);
             window.removeEventListener('focus', onFocus);
             clearRetryTimer();

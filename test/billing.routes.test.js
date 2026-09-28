@@ -134,14 +134,33 @@ test('subscribe: reused open row is for a different plan is expired locally, the
     } finally { await srv.close(); }
 });
 
-test('subscribe: reused open row already progressed at Razorpay (status != created) is expired locally, then a new one is created', async () => {
+test('subscribe: reused open row already terminal at Razorpay (e.g. halted) is expired locally, then a new one is created', async () => {
     const billing = fakeBilling({ subs: [{ user_id: USER, razorpay_subscription_id: 'sub_old', status: 'created' }] });
-    const remote = { sub_old: { id: 'sub_old', status: 'active', plan_id: 'plan_1' } };
-    const { srv, headers } = await setup({ billing, razorpay: fakeRazorpay({ remote }) });
+    const remote = { sub_old: { id: 'sub_old', status: 'halted', plan_id: 'plan_1' } };
+    const { srv, headers, razorpay } = await setup({ billing, razorpay: fakeRazorpay({ remote }) });
     try {
         const body = await (await fetch(`${srv.url}/api/billing/subscribe`, { method: 'POST', headers })).json();
         assert.equal(body.subscriptionId, 'sub_new1');
         assert.equal(billing.subs.find((s) => s.razorpay_subscription_id === 'sub_old').status, 'expired');
+        assert.equal(razorpay.log.created.length, 1);
+    } finally { await srv.close(); }
+});
+
+// Follow-up fix (A, money-safety): a reused row that has already progressed past 'created'
+// (authenticated/active/pending) at Razorpay means the user already paid — a webhook just
+// hasn't caught the local row up yet. Must never be expired or replaced by a second subscription.
+test('subscribe: reused open row already paid at Razorpay (progressed, not terminal) is synced, not expired — 409, no new subscription', async () => {
+    const billing = fakeBilling({ subs: [{ user_id: USER, razorpay_subscription_id: 'sub_old', status: 'created' }] });
+    const remote = { sub_old: { id: 'sub_old', status: 'active', plan_id: 'plan_1', current_end: 1767225600, short_url: 'https://rzp.io/i/old' } };
+    const { srv, headers, razorpay } = await setup({ billing, razorpay: fakeRazorpay({ remote }) });
+    try {
+        const res = await fetch(`${srv.url}/api/billing/subscribe`, { method: 'POST', headers });
+        assert.equal(res.status, 409);
+        assert.equal(billing.subs[0].razorpay_subscription_id, 'sub_old');
+        assert.equal(billing.subs[0].status, 'active');
+        assert.equal(billing.subs[0].current_end, '2026-01-01T00:00:00.000Z');
+        assert.equal(billing.subs[0].short_url, 'https://rzp.io/i/old');
+        assert.equal(razorpay.log.created.length, 0);
     } finally { await srv.close(); }
 });
 
