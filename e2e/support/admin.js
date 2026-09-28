@@ -14,11 +14,12 @@ function numericHash(str) {
     return h;
 }
 
-// A 10-digit Indian mobile number (+91, starting with 9) that's unique per (runId, counter) so
-// concurrent/successive runs don't collide on a phone number.
+// A +91 number that is NOT a real Indian mobile (those start with 6-9): "+9150" followed by 8
+// digits — 6 from the run id and 2 from the per-run counter — so approvals/OTPs triggered by
+// the suite never text a stranger, and concurrent/successive runs don't collide.
 function genPhone(runId, n) {
-    const base = (numericHash(runId) % 1e7).toString().padStart(7, '0');
-    return `+919${base}${String(n).padStart(2, '0')}`;
+    const base = (numericHash(runId) % 1e6).toString().padStart(6, '0');
+    return `+9150${base}${String(n % 100).padStart(2, '0')}`;
 }
 
 // Creates fully-verified users through the Supabase Admin API so no inbox/SMS is needed.

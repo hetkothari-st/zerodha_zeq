@@ -20,6 +20,16 @@ function isAllowedTarget(baseUrl, stagingHostsCsv) {
     return allowed.includes(hostname);
 }
 
+function hostOf(value) {
+    const v = String(value || '').trim();
+    if (!v) return '';
+    try {
+        return new URL(v.includes('://') ? v : `https://${v}`).hostname.toLowerCase();
+    } catch {
+        return '';
+    }
+}
+
 // Returns null when the suite isn't configured (tests skip); throws when pointed at production.
 export function readE2EEnv(env = process.env) {
     const baseUrl = env.E2E_BASE_URL;
@@ -27,7 +37,19 @@ export function readE2EEnv(env = process.env) {
     const serviceKey = env.E2E_SUPABASE_SERVICE_KEY;
     if (!baseUrl || !supabaseUrl || !serviceKey) return null;
     if (env.E2E_ALLOW_ANY_TARGET !== '1' && !isAllowedTarget(baseUrl, env.E2E_STAGING_HOSTS)) {
-        throw new Error(`Refusing to run E2E against ${baseUrl} (not staging/localhost). Set E2E_ALLOW_ANY_TARGET=1 to override.`);
+        throw new Error(
+            `Refusing to run E2E against ${baseUrl} (not staging/localhost). If this is your staging app, add its hostname to `
+            + 'E2E_STAGING_HOSTS (comma-separated; the hostname must still contain a "staging" label, e.g. staging.funnelop.in). '
+            + 'E2E_ALLOW_ANY_TARGET=1 is only for local special cases — never production.',
+        );
+    }
+    // Production Supabase projects are refused outright (no override): the suite creates and
+    // deletes users there.
+    const supabaseHost = hostOf(supabaseUrl);
+    if (!supabaseHost) throw new Error(`Refusing to run E2E: E2E_SUPABASE_URL "${supabaseUrl}" is not a valid URL.`);
+    const prodHosts = (env.E2E_PROD_SUPABASE_HOSTS || '').split(',').map(hostOf).filter(Boolean);
+    if (prodHosts.includes(supabaseHost)) {
+        throw new Error(`Refusing to run E2E against Supabase project ${supabaseHost}: it is listed in E2E_PROD_SUPABASE_HOSTS (production). Use the staging project's URL and keys.`);
     }
     return {
         baseUrl: baseUrl.replace(/\/$/, ''),

@@ -39,3 +39,22 @@ test('defaults and run id', () => {
 test('missing required vars → null (suite skips)', () => {
     assert.equal(readE2EEnv({}), null);
 });
+test('the refusal message points at E2E_STAGING_HOSTS first and scopes E2E_ALLOW_ANY_TARGET to local special cases', () => {
+    let message = '';
+    try { readE2EEnv({ ...base, E2E_BASE_URL: 'https://funnelop.in' }); } catch (e) { message = e.message; }
+    assert.match(message, /E2E_STAGING_HOSTS/);
+    assert.match(message, /staging/);
+    assert.ok(message.indexOf('E2E_STAGING_HOSTS') < message.indexOf('E2E_ALLOW_ANY_TARGET'));
+    assert.match(message, /E2E_ALLOW_ANY_TARGET=1 is (only )?for local special cases/i);
+    assert.match(message, /never production/i);
+});
+test('refuses a Supabase project listed in E2E_PROD_SUPABASE_HOSTS, even with E2E_ALLOW_ANY_TARGET=1', () => {
+    const prod = { E2E_PROD_SUPABASE_HOSTS: 'prodop.supabase.co, https://PRODEQ.supabase.co/' };
+    assert.throws(() => readE2EEnv({ ...base, ...prod, E2E_SUPABASE_URL: 'https://prodop.supabase.co' }), /refusing.*E2E_PROD_SUPABASE_HOSTS/i);
+    assert.throws(() => readE2EEnv({ ...base, ...prod, E2E_SUPABASE_URL: 'https://prodeq.supabase.co/' }), /refusing.*E2E_PROD_SUPABASE_HOSTS/i);
+    assert.throws(() => readE2EEnv({ ...base, ...prod, E2E_SUPABASE_URL: 'https://prodop.supabase.co', E2E_ALLOW_ANY_TARGET: '1' }), /refusing/i);
+    assert.equal(readE2EEnv({ ...base, ...prod }).supabaseUrl, 'https://x.supabase.co');
+});
+test('an unparseable E2E_SUPABASE_URL is refused', () => {
+    assert.throws(() => readE2EEnv({ ...base, E2E_SUPABASE_URL: 'not a url', E2E_PROD_SUPABASE_HOSTS: 'prodop.supabase.co' }), /refusing/i);
+});

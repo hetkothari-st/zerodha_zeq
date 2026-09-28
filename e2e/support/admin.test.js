@@ -39,7 +39,7 @@ test('createVerifiedUser succeeds once the PATCH returns a row, without exhausti
     assert.equal(patchCalls, 3);
 });
 
-test('createVerifiedUser assigns unique, well-formed +91 phone numbers and a run-unique full_name', async () => {
+test('createVerifiedUser assigns unique +9150 phone numbers (never a real Indian mobile) and a run-unique full_name', async () => {
     const created = [];
     global.fetch = async (url, init = {}) => {
         if (init.method === 'POST' && url.includes('/auth/v1/admin/users')) {
@@ -53,8 +53,8 @@ test('createVerifiedUser assigns unique, well-formed +91 phone numbers and a run
     const api = adminApi({ supabaseUrl: 'https://x.supabase.co', serviceKey: 'k', emailDomain: 'e2e.test', runId: 'deadbeef' });
     await api.createVerifiedUser({});
     await api.createVerifiedUser({});
-    assert.match(created[0].phone, /^\+919\d{9}$/);
-    assert.match(created[1].phone, /^\+919\d{9}$/);
+    assert.match(created[0].phone, /^\+9150\d{8}$/);
+    assert.match(created[1].phone, /^\+9150\d{8}$/);
     assert.notEqual(created[0].phone, created[1].phone);
     assert.equal(created[0].user_metadata.full_name, 'E2E deadbeef 1');
     assert.equal(created[1].user_metadata.full_name, 'E2E deadbeef 2');
@@ -73,7 +73,32 @@ test('createVerifiedUser derives a valid phone even for a non-hex E2E_RUN_ID ove
     };
     const api = adminApi({ supabaseUrl: 'https://x.supabase.co', serviceKey: 'k', emailDomain: 'e2e.test', runId: 'not-hex-run-id' });
     await api.createVerifiedUser({});
-    assert.match(created[0].phone, /^\+919\d{9}$/);
+    assert.match(created[0].phone, /^\+9150\d{8}$/);
+});
+
+test('generated phones are unique across a run and never start with an Indian mobile digit (6-9)', async () => {
+    const created = [];
+    global.fetch = async (url, init = {}) => {
+        if (init.method === 'POST' && url.includes('/auth/v1/admin/users')) {
+            created.push(JSON.parse(init.body));
+            return jsonRes({ id: `u${created.length}` });
+        }
+        if (init.method === 'PATCH') return jsonRes([{ id: 'x' }]);
+        throw new Error(`unexpected fetch ${init.method || 'GET'} ${url}`);
+    };
+    const api = adminApi({ supabaseUrl: 'https://x.supabase.co', serviceKey: 'k', emailDomain: 'e2e.test', runId: 'cafe0123' });
+    for (let i = 0; i < 25; i += 1) await api.createVerifiedUser({});
+    const phones = created.map((b) => b.phone);
+    assert.equal(new Set(phones).size, phones.length);
+    for (const p of phones) {
+        assert.match(p, /^\+9150\d{8}$/);
+        assert.doesNotMatch(p, /^\+91[6-9]/);
+    }
+    // A different run id gives different numbers.
+    const other = adminApi({ supabaseUrl: 'https://x.supabase.co', serviceKey: 'k', emailDomain: 'e2e.test', runId: 'beef4567' });
+    created.length = 0;
+    await other.createVerifiedUser({});
+    assert.notEqual(created[0].phone, phones[0]);
 });
 
 test('deleteRunUsers paginates until a short page, matching by email prefix or an exact test-phone digit string', async () => {
