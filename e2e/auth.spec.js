@@ -31,6 +31,7 @@ test('rejected user sees the not-approved screen', async ({ page }) => {
 });
 
 test('user without a verified mobile is asked to add one', async ({ page }) => {
+    test.skip(process.env.E2E_REQUIRE_MOBILE !== 'true', 'mobile step is on hold (REQUIRE_MOBILE flag) until SMS/DLT is live; set E2E_REQUIRE_MOBILE=true to re-enable');
     const u = await user({ withPhone: false });
     await signIn(page, u);
     await expect(page.getByRole('heading', { name: 'Add your mobile' })).toBeVisible();

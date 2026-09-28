@@ -41,6 +41,18 @@ test('does not re-claim an already-claimed session (reload of a displaced device
     expect(client.auth.signOut).not.toHaveBeenCalled();
 });
 
+test('mobile step is off by default: a user without a verified phone still reaches app', async () => {
+    const noPhoneUser = { ...fullUser, phone_confirmed_at: null };
+    render(<AuthProvider client={createFakeSupabase({ session: sessionFor('s1', noPhoneUser), profile: { id: 'u1', status: 'approved' } })}><Probe /></AuthProvider>);
+    await waitFor(() => expect(screen.getByTestId('screen')).toHaveTextContent('app'));
+});
+
+test('requireMobile=true sends a user without a verified phone to addMobile', async () => {
+    const noPhoneUser = { ...fullUser, phone_confirmed_at: null };
+    render(<AuthProvider client={createFakeSupabase({ session: sessionFor('s1', noPhoneUser), profile: { id: 'u1', status: 'approved' } })} requireMobile><Probe /></AuthProvider>);
+    await waitFor(() => expect(screen.getByTestId('screen')).toHaveTextContent('addMobile'));
+});
+
 test('profile load error → unavailable', async () => {
     renderWith(createFakeSupabase({ session: sessionFor('s1'), profileError: { message: 'down' } }));
     await waitFor(() => expect(screen.getByTestId('screen')).toHaveTextContent('unavailable'));

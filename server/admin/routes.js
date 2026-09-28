@@ -5,7 +5,7 @@ import { wrap } from '../auth/middleware.js';
 const STATUSES = new Set(['pending', 'approved', 'rejected']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export function createAdminRouter({ auth, profileAdmin, profiles, notifier }) {
+export function createAdminRouter({ auth, profileAdmin, profiles, notifier, requireMobile = false }) {
     const router = express.Router();
 
     router.get('/api/admin/users', ...auth.requireAdmin, wrap(async (req, res) => {
@@ -30,9 +30,13 @@ export function createAdminRouter({ auth, profileAdmin, profiles, notifier }) {
             let updated;
             try {
                 if (status === 'approved') {
-                    const target = await profileAdmin.getById(id);
-                    if (!target) return sendError(res, 'not_found', 'No such user.');
-                    if (!target.phone) return sendError(res, 'bad_request', "This user hasn't verified a mobile number yet.");
+                    if (requireMobile) {
+                        const target = await profileAdmin.getById(id);
+                        if (!target) return sendError(res, 'not_found', 'No such user.');
+                        if (!target.phone) return sendError(res, 'bad_request', "This user hasn't verified a mobile number yet.");
+                    } else if (!(await profileAdmin.getById(id))) {
+                        return sendError(res, 'not_found', 'No such user.');
+                    }
                 }
                 updated = await profileAdmin.setStatus(id, status, req.auth.userId);
             } catch (err) {

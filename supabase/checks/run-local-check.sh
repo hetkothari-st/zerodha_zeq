@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 STUB_SQL="$SCRIPT_DIR/local-supabase-stub.sql"
-MIGRATION_SQL="$REPO_ROOT/supabase/migrations/20260925000000_auth_profiles.sql"
+MIGRATIONS_DIR="$REPO_ROOT/supabase/migrations"
 CHECK_SQL="$SCRIPT_DIR/auth_profiles_check.sql"
 
 CONTAINER_NAME="funnel-auth-check-$$-$(date +%s)"
@@ -53,7 +53,13 @@ run_sql_file() {
 }
 
 run_sql_file "Supabase stub (local-supabase-stub.sql)" "$STUB_SQL"
-run_sql_file "migration (20260925000000_auth_profiles.sql)" "$MIGRATION_SQL"
+
+# Apply every migration in supabase/migrations, in name order (they're timestamp-prefixed),
+# so the check runs against the schema exactly as it will exist after `supabase db push`.
+for migration in "$MIGRATIONS_DIR"/*.sql; do
+    run_sql_file "migration ($(basename "$migration"))" "$migration"
+done
+
 run_sql_file "check script (auth_profiles_check.sql)" "$CHECK_SQL"
 
 echo "==> All steps completed successfully"

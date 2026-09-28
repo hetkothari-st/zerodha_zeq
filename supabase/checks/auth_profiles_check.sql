@@ -12,13 +12,16 @@ begin
     if not found then
         raise exception 'FAIL: profile row not created for user 1';
     end if;
-    if p.status is distinct from 'pending'
+    -- Auto-approved by migration 20260928000000_auto_approve_dev.sql, which opens sign-up
+    -- during development by defaulting new profiles to 'approved' instead of 'pending'.
+    -- Revert that migration (see its header) to restore the 'pending' default.
+    if p.status is distinct from 'approved'
         or p.full_name is distinct from 'Check User'
         or p.signup_provider is distinct from 'google'
         or p.email is distinct from 'check@example.com' then
         raise exception 'FAIL: profile not created as expected: %', row_to_json(p);
     end if;
-    raise notice 'ok: profile auto-created as pending';
+    raise notice 'ok: profile auto-created as approved (dev default; see 20260928000000_auto_approve_dev.sql)';
 end $$;
 
 update auth.users set phone = '919876543210', phone_confirmed_at = now() where id = '00000000-0000-4000-8000-000000000001';

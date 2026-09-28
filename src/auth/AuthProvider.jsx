@@ -3,6 +3,7 @@ import { getSupabase } from './supabaseClient';
 import { friendlyError } from './core/errors';
 import { sessionIdOf } from './core/validators';
 import { screenFor } from './core/screenFor';
+import { REQUIRE_MOBILE } from './core/featureFlags';
 import { createApiFetch } from './core/apiFetch';
 import { setUserNamespace, migrateToUserNamespace } from './userStorage';
 
@@ -63,7 +64,7 @@ const EXPIRED_LINK_DESCRIPTION = 'Email link is invalid or has expired';
 
 const result = (error) => ({ error: friendlyError(error), code: error?.code ?? null });
 
-export function AuthProvider({ children, client: clientProp }) {
+export function AuthProvider({ children, client: clientProp, requireMobile = REQUIRE_MOBILE }) {
     const client = useMemo(() => {
         try {
             return clientProp ?? getSupabase();
@@ -288,7 +289,7 @@ export function AuthProvider({ children, client: clientProp }) {
         },
     }), [client, origin, loadProfile, refreshSessionState, claimIfNew]);
 
-    const screen = claiming ? 'loading' : screenFor({ loading, recovery, linkError, session, profile, profileError, startupError, claimError });
+    const screen = claiming ? 'loading' : screenFor({ loading, recovery, linkError, session, profile, profileError, startupError, claimError, requireMobile });
     const accessToken = session?.access_token ?? null;
 
     // Displacement normally arrives over the hub WebSocket or an API 401. When the socket is

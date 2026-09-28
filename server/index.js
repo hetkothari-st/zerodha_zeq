@@ -35,6 +35,7 @@ const app = createApp({
             auth, profiles,
             profileAdmin: createProfileAdmin({ supabaseUrl: config.supabaseUrl, serviceKey: config.supabaseServiceKey }),
             notifier: createNotifier(config),
+            requireMobile: config.requireMobile,
         }),
     ],
 });

@@ -34,7 +34,7 @@ async function setup(opts = {}) {
     const notifier = opts.notifier ?? { userApproved: async (p) => notified.push(['approved', p.id]), userRejected: async (p) => notified.push(['rejected', p.id]) };
     const app = express();
     app.use(express.json());
-    app.use(createAdminRouter({ auth, profileAdmin, profiles, notifier }));
+    app.use(createAdminRouter({ auth, profileAdmin, profiles, notifier, requireMobile: opts.requireMobile }));
     // eslint-disable-next-line no-unused-vars
     app.use((err, req, res, next) => res.status(500).json({ code: 'internal' }));
     const srv = await listen(app);
@@ -83,14 +83,25 @@ test('invalid id → 400, unknown id → 404', async () => {
     } finally { await srv.close(); }
 });
 
-test('approve: user without a verified mobile → 400, nothing changed', async () => {
-    const { srv, as, profileAdmin, notified } = await setup({ rows: [pendingRow, noPhoneRow] });
+test('approve: user without a verified mobile → 400, nothing changed (requireMobile=true)', async () => {
+    const { srv, as, profileAdmin, notified } = await setup({ rows: [pendingRow, noPhoneRow], requireMobile: true });
     try {
         const res = await fetch(`${srv.url}/api/admin/users/${NO_PHONE}/approve`, { method: 'POST', headers: as('admin') });
         assert.equal(res.status, 400);
         assert.deepEqual(await res.json(), { code: 'bad_request', message: "This user hasn't verified a mobile number yet." });
         assert.deepEqual(profileAdmin.log.setStatus, []);
         assert.deepEqual(notified, []);
+    } finally { await srv.close(); }
+});
+
+test('approve: user without a verified mobile succeeds when requireMobile is off (default, dev mode)', async () => {
+    const { srv, as, profileAdmin, notified } = await setup({ rows: [pendingRow, noPhoneRow] });
+    try {
+        const res = await fetch(`${srv.url}/api/admin/users/${NO_PHONE}/approve`, { method: 'POST', headers: as('admin') });
+        assert.equal(res.status, 200);
+        assert.equal((await res.json()).user.status, 'approved');
+        assert.deepEqual(profileAdmin.log.setStatus, [{ id: NO_PHONE, status: 'approved', adminId: 'admin' }]);
+        assert.deepEqual(notified, [['approved', NO_PHONE]]);
     } finally { await srv.close(); }
 });
 

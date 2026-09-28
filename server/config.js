@@ -19,5 +19,8 @@ export function loadConfig(env, { defaultPort }) {
         emailFrom: env.EMAIL_FROM || '',
         msg91AuthKey: env.MSG91_AUTH_KEY || '',
         msg91ApprovedTemplateId: env.MSG91_APPROVED_TEMPLATE_ID || '',
+        // Mobile OTP verification is on hold during development until SMS/DLT is live.
+        // Set REQUIRE_MOBILE=true to require a verified phone before admin approval again.
+        requireMobile: env.REQUIRE_MOBILE === 'true',
     };
 }

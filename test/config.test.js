@@ -21,6 +21,13 @@ test('loadConfig applies defaults and strips the trailing slash', () => {
     assert.equal(c.hubUrl, 'http://127.0.0.1:8765');
     assert.equal(c.productName, 'Funnel');
     assert.equal(c.kiteAccessToken, '');
+    assert.equal(c.requireMobile, false);
+});
+
+test('loadConfig only sets requireMobile true for the literal string "true"', () => {
+    assert.equal(loadConfig({ ...base, REQUIRE_MOBILE: 'true' }, { defaultPort: 3001 }).requireMobile, true);
+    assert.equal(loadConfig({ ...base, REQUIRE_MOBILE: '1' }, { defaultPort: 3001 }).requireMobile, false);
+    assert.equal(loadConfig({ ...base, REQUIRE_MOBILE: 'false' }, { defaultPort: 3001 }).requireMobile, false);
 });
 
 test('loadConfig reads PORT and optional values', () => {
