@@ -9,6 +9,7 @@ import {
     FLOW_THRESHOLD, DP_WINDOW, intervalPriceQty, bvcBuyFraction,
     foldFlow, emptyFlowBucket, reBucketFlow, computeFlowStats,
 } from '../lib/orderFlow';
+import { mergePersistedState } from '../lib/mergePersisted';
 import { useEntitlement } from '../billing/EntitlementProvider';
 
 function cn(...inputs) {
@@ -1663,6 +1664,19 @@ const VerticalLayout = ({
         }
     };
 
+    // Full persisted blob as it was on disk at mount time (already passed
+    // through loadPersisted()'s same-day / same-bucket-size checks above), so
+    // stale-day data is never resurrected from it. Free-plan users only load
+    // STOCK_LIST-scoped state into React state below, so a Pro user's extra
+    // stocks (hidden while on Free) would otherwise never be read again and
+    // get silently dropped by the periodic flush further down. Captured once
+    // (lazy-ref pattern) so we don't re-parse localStorage on every flush —
+    // the flush instead merges its live in-memory copy against this.
+    const persistedExtrasRef = useRef(null);
+    if (persistedExtrasRef.current === null) {
+        persistedExtrasRef.current = loadPersisted() || {};
+    }
+
     // Per-stock RAW 1-minute history (the source of truth).
     // The displayed/aggregated view is derived from this via
     // `displayedHistories = useMemo(...)` below.
@@ -1732,17 +1746,17 @@ const VerticalLayout = ({
         try { localStorage.setItem(ORDER_KEY, JSON.stringify(columnOrder)); } catch { }
     }, [columnOrder]);
 
-    // Sync column order with the active STOCK_LIST: drop removed stocks,
-    // append newly added ones to the end.
+    // Sync column order with the active STOCK_LIST: append newly added
+    // stocks to the end. Stocks no longer in STOCK_LIST (e.g. a Pro user's
+    // extra stock hidden after their plan lapses to Free) are intentionally
+    // NOT dropped from the order — `orderedStocks` below already renders
+    // only ids that resolve in STOCK_LIST, and keeping the id here preserves
+    // its saved column position for if/when it becomes visible again.
     useEffect(() => {
-        const ids = new Set(STOCK_LIST.map(s => s.id));
         setColumnOrder(prev => {
-            const filtered = prev.filter(id => ids.has(id));
-            const missing = STOCK_LIST.map(s => s.id).filter(id => !filtered.includes(id));
-            const next = [...filtered, ...missing];
-            // shallow equality check to avoid infinite re-renders
-            if (next.length === prev.length && next.every((v, i) => v === prev[i])) return prev;
-            return next;
+            const missing = STOCK_LIST.map(s => s.id).filter(id => !prev.includes(id));
+            if (missing.length === 0) return prev;
+            return [...prev, ...missing];
         });
     }, [STOCK_LIST]);
 
@@ -1964,15 +1978,22 @@ const VerticalLayout = ({
         return () => el.removeEventListener('wheel', onWheel);
     }, []);
 
-    // Make sure when STOCK_LIST grows (user adds an extra stock) we have an
-    // empty bucket ready for the new id.
+    // Make sure when STOCK_LIST grows (user adds an extra stock, or a Free
+    // user's lapsed subscription comes back and a previously-hidden extra
+    // stock reappears) we have a bucket ready for the new id. When the mount-
+    // time persisted blob (persistedExtrasRef) has a saved entry for it —
+    // e.g. it was hidden by the Free plan for this whole session and so was
+    // never loaded into React state — restore that instead of starting blank,
+    // so the stock's history/snapshot/flow come back rather than resetting.
     useEffect(() => {
+        const extras = persistedExtrasRef.current || {};
         setHistories(prev => {
             const next = { ...prev };
             let changed = false;
             for (const s of STOCK_LIST) {
                 if (!(s.id in next)) {
-                    next[s.id] = [];
+                    const saved = extras.histories?.[s.id];
+                    next[s.id] = Array.isArray(saved) ? saved : [];
                     changed = true;
                 }
             }
@@ -1983,7 +2004,7 @@ const VerticalLayout = ({
             let changed = false;
             for (const s of STOCK_LIST) {
                 if (!(s.id in next)) {
-                    next[s.id] = { ltp: null, vol: null };
+                    next[s.id] = extras.snapshots?.[s.id] || { ltp: null, vol: null };
                     changed = true;
                 }
             }
@@ -1993,7 +2014,11 @@ const VerticalLayout = ({
             const next = { ...prev };
             let changed = false;
             for (const s of STOCK_LIST) {
-                if (!(s.id in next)) { next[s.id] = []; changed = true; }
+                if (!(s.id in next)) {
+                    const saved = extras.flow?.[s.id];
+                    next[s.id] = Array.isArray(saved) ? saved : [];
+                    changed = true;
+                }
             }
             return changed ? next : prev;
         });
@@ -2050,12 +2075,24 @@ const VerticalLayout = ({
             try {
                 // Persisted data is always RAW 15s (the source of truth).
                 // The bucketSize tag is fixed at RAW_BUCKET_MINUTES so the loader knows.
+                // Merge against the mount-time saved blob so symbols the
+                // current plan hides (not in STOCK_LIST — e.g. a Pro user's
+                // extra stocks after lapsing to Free) keep their saved
+                // history/snapshot/flow instead of being wiped by this
+                // STOCK_LIST-scoped in-memory state. Known symbols are
+                // unaffected — their in-memory copy always wins.
+                const knownIds = stockListRef.current.map(s => s.id);
+                const merged = mergePersistedState(
+                    persistedExtrasRef.current,
+                    { histories: histRef.current, snapshots: snapRef.current, flow: flowRef.current },
+                    knownIds,
+                );
                 localStorage.setItem(STORAGE_KEY, JSON.stringify({
                     day: todayKey(),
                     bucketSize: RAW_BUCKET_MINUTES,
-                    histories: histRef.current,
-                    snapshots: snapRef.current,
-                    flow: flowRef.current,
+                    histories: merged.histories,
+                    snapshots: merged.snapshots,
+                    flow: merged.flow,
                 }));
             } catch { }
         };
@@ -2324,6 +2361,10 @@ const VerticalLayout = ({
         flowRef.current = Object.fromEntries(STOCK_LIST.map(s => [s.id, []]));
         setFlow(Object.fromEntries(STOCK_LIST.map(s => [s.id, []])));
         flowPrevRef.current = {};
+        // Explicit "Clear" wipes everything, including any symbols currently
+        // hidden by the plan — drop the mount-time extras cache too, or the
+        // next flush's merge would resurrect them right back into storage.
+        persistedExtrasRef.current = {};
         try { localStorage.removeItem(STORAGE_KEY); } catch { }
     };
 
@@ -2344,6 +2385,14 @@ const VerticalLayout = ({
         flowRef.current = nextFlow;
         setFlow(nextFlow);
         delete flowPrevRef.current[stockId];
+        // Explicit removal — don't let a stale mount-time saved copy of this
+        // symbol (if any) get resurrected by the next flush's merge.
+        const extras = persistedExtrasRef.current;
+        if (extras) {
+            if (extras.histories) delete extras.histories[stockId];
+            if (extras.snapshots) delete extras.snapshots[stockId];
+            if (extras.flow) delete extras.flow[stockId];
+        }
     };
 
     // Listen for the global "Clear" button in App.jsx top bar. The event
