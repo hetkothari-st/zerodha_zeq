@@ -56,6 +56,18 @@ const buildStockFromSymbol = (sym) => {
     };
 };
 
+// Scrub legacy zero-delta rows from before the cross-boundary flush fix, out
+// of a persisted RAW history array. Keeps the most recent row (it can
+// legitimately be 0 while still being filled) and any row whose delta is > 0.
+// Shared by the mount-time loader and the "STOCK_LIST grows" restore path so
+// a symbol that comes back into view (e.g. re-upgrading to Pro) is scrubbed
+// exactly like one that was loaded at mount.
+const scrubZeroDeltaRows = (arr) => {
+    if (!Array.isArray(arr) || arr.length === 0) return arr || [];
+    const lastIdx = arr.length - 1;
+    return arr.filter((row, i) => i === lastIdx || (row.delta || 0) > 0);
+};
+
 // ---------- Volume / price field readers ----------
 const VOLUME_KEYS = ['TTQ', 'ttq', 'TotalTradedQty', 'TotalTradedQuantity', 'Volume', 'V', 'vol', 'volume'];
 const PRICE_KEYS = ['LTP', 'ltp', 'LastTradedPrice', 'Price', 'lp', 'iv'];
@@ -1672,10 +1684,26 @@ const VerticalLayout = ({
     // get silently dropped by the periodic flush further down. Captured once
     // (lazy-ref pattern) so we don't re-parse localStorage on every flush —
     // the flush instead merges its live in-memory copy against this.
+    //
+    // A session can stay mounted across midnight, so the cache is also
+    // tagged with the trading day it was captured on. Every USE of the
+    // cache (not just the capture) re-checks that tag against "now" and
+    // drops the cache if the day has rolled over — a tab left open past
+    // midnight must not carry a hidden stock's yesterday data into today's
+    // flush, or restore it into a symbol that becomes visible again today.
     const persistedExtrasRef = useRef(null);
+    const persistedExtrasDayRef = useRef(null);
     if (persistedExtrasRef.current === null) {
         persistedExtrasRef.current = loadPersisted() || {};
+        persistedExtrasDayRef.current = todayKey();
     }
+    const getFreshExtras = () => {
+        if (persistedExtrasDayRef.current !== todayKey()) {
+            persistedExtrasRef.current = {};
+            persistedExtrasDayRef.current = todayKey();
+        }
+        return persistedExtrasRef.current;
+    };
 
     // Per-stock RAW 1-minute history (the source of truth).
     // The displayed/aggregated view is derived from this via
@@ -1688,15 +1716,7 @@ const VerticalLayout = ({
             for (const s of STOCK_LIST) {
                 const arr = persisted.histories[s.id];
                 if (!Array.isArray(arr)) continue;
-                // Scrub legacy zero-delta rows from before the cross-boundary
-                // flush fix. Keep the most recent row (it can legitimately be
-                // 0 while still being filled) and any row whose delta is > 0.
-                if (arr.length === 0) {
-                    base[s.id] = arr;
-                    continue;
-                }
-                const lastIdx = arr.length - 1;
-                base[s.id] = arr.filter((row, i) => i === lastIdx || (row.delta || 0) > 0);
+                base[s.id] = scrubZeroDeltaRows(arr);
             }
         }
         return base;
@@ -1980,20 +2000,23 @@ const VerticalLayout = ({
 
     // Make sure when STOCK_LIST grows (user adds an extra stock, or a Free
     // user's lapsed subscription comes back and a previously-hidden extra
-    // stock reappears) we have a bucket ready for the new id. When the mount-
-    // time persisted blob (persistedExtrasRef) has a saved entry for it —
-    // e.g. it was hidden by the Free plan for this whole session and so was
-    // never loaded into React state — restore that instead of starting blank,
-    // so the stock's history/snapshot/flow come back rather than resetting.
+    // stock reappears) we have a bucket ready for the new id. When the
+    // (day-checked) extras cache has a saved entry for it — e.g. it was
+    // hidden by the Free plan for this whole session and so was never
+    // loaded into React state — restore that instead of starting blank, so
+    // the stock's history/snapshot/flow come back rather than resetting.
+    // getFreshExtras() drops the cache if the trading day has rolled over
+    // since it was captured, so a symbol coming back into view never gets
+    // seeded with yesterday's stale data.
     useEffect(() => {
-        const extras = persistedExtrasRef.current || {};
+        const extras = getFreshExtras();
         setHistories(prev => {
             const next = { ...prev };
             let changed = false;
             for (const s of STOCK_LIST) {
                 if (!(s.id in next)) {
                     const saved = extras.histories?.[s.id];
-                    next[s.id] = Array.isArray(saved) ? saved : [];
+                    next[s.id] = Array.isArray(saved) ? scrubZeroDeltaRows(saved) : [];
                     changed = true;
                 }
             }
@@ -2075,15 +2098,19 @@ const VerticalLayout = ({
             try {
                 // Persisted data is always RAW 15s (the source of truth).
                 // The bucketSize tag is fixed at RAW_BUCKET_MINUTES so the loader knows.
-                // Merge against the mount-time saved blob so symbols the
-                // current plan hides (not in STOCK_LIST — e.g. a Pro user's
-                // extra stocks after lapsing to Free) keep their saved
+                // Merge against the cached saved blob so symbols the current
+                // plan hides (not in STOCK_LIST — e.g. a Pro user's extra
+                // stocks after lapsing to Free) keep their saved
                 // history/snapshot/flow instead of being wiped by this
                 // STOCK_LIST-scoped in-memory state. Known symbols are
                 // unaffected — their in-memory copy always wins.
+                // getFreshExtras() drops the cache if the trading day has
+                // rolled over since it was captured (or last invalidated),
+                // so a tab left open past midnight never carries a hidden
+                // stock's yesterday data into today's blob.
                 const knownIds = stockListRef.current.map(s => s.id);
                 const merged = mergePersistedState(
-                    persistedExtrasRef.current,
+                    getFreshExtras(),
                     { histories: histRef.current, snapshots: snapRef.current, flow: flowRef.current },
                     knownIds,
                 );
@@ -2361,10 +2388,13 @@ const VerticalLayout = ({
         flowRef.current = Object.fromEntries(STOCK_LIST.map(s => [s.id, []]));
         setFlow(Object.fromEntries(STOCK_LIST.map(s => [s.id, []])));
         flowPrevRef.current = {};
-        // Explicit "Clear" wipes everything, including any symbols currently
-        // hidden by the plan — drop the mount-time extras cache too, or the
-        // next flush's merge would resurrect them right back into storage.
-        persistedExtrasRef.current = {};
+        // Ruling: "Clear" only clears what the user can currently see.
+        // Symbols hidden by the plan (not in STOCK_LIST) are intentionally
+        // left alone — we do NOT touch the extras cache here, and the
+        // removeItem below only clears the on-disk copy transiently: the
+        // next periodic flush (or unload flush) merges the untouched extras
+        // cache back in via mergePersistedState, so a hidden stock's saved
+        // data survives Clear All while the visible symbols stay cleared.
         try { localStorage.removeItem(STORAGE_KEY); } catch { }
     };
 
@@ -2385,14 +2415,16 @@ const VerticalLayout = ({
         flowRef.current = nextFlow;
         setFlow(nextFlow);
         delete flowPrevRef.current[stockId];
-        // Explicit removal — don't let a stale mount-time saved copy of this
-        // symbol (if any) get resurrected by the next flush's merge.
-        const extras = persistedExtrasRef.current;
-        if (extras) {
-            if (extras.histories) delete extras.histories[stockId];
-            if (extras.snapshots) delete extras.snapshots[stockId];
-            if (extras.flow) delete extras.flow[stockId];
-        }
+        // Also drop its saved column position — it was explicitly removed,
+        // not just hidden by a plan change, so it shouldn't reappear in a
+        // stale spot if this symbol is added back later.
+        setColumnOrder(prev => prev.includes(stockId) ? prev.filter(id => id !== stockId) : prev);
+        // Explicit removal — don't let a (still same-day) cached saved copy
+        // of this symbol get resurrected by the next flush's merge.
+        const extras = getFreshExtras();
+        if (extras.histories) delete extras.histories[stockId];
+        if (extras.snapshots) delete extras.snapshots[stockId];
+        if (extras.flow) delete extras.flow[stockId];
     };
 
     // Listen for the global "Clear" button in App.jsx top bar. The event
