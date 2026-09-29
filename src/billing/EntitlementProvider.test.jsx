@@ -12,6 +12,11 @@ function Probe() {
     return <div>{e.loading ? 'loading' : `${e.plan}|${e.isPro}|${e.billingEnabled}`}<button onClick={e.openUpgrade}>up</button></div>;
 }
 
+function ProbeResumable() {
+    const e = useEntitlement();
+    return <div>{e.loading ? 'loading' : `resumable:${e.resumable}`}</div>;
+}
+
 // Unlike Probe, always shows loading + isPro together — needed to assert isPro is true
 // *while* loading (Probe collapses to the literal text "loading" in that state).
 function ProbeAlways() {
@@ -118,5 +123,15 @@ describe('EntitlementProvider', () => {
         await screen.findByText('free|false|true');
         act(() => screen.getByText('up').click());
         expect(screen.getByText('upgrade-modal')).toBeInTheDocument();
+    });
+    it('passes resumable through from the status response, defaulting to false', async () => {
+        apiFetchRef.current = vi.fn(async () => ({ ok: true, status: 200, data: { plan: 'pro', source: 'subscription', cancelAtPeriodEnd: true, resumable: true } }));
+        render(<EntitlementProvider><ProbeResumable /></EntitlementProvider>);
+        expect(await screen.findByText('resumable:true')).toBeInTheDocument();
+    });
+    it('resumable defaults to false when the status response omits it', async () => {
+        apiFetchRef.current = vi.fn(async () => ({ ok: true, status: 200, data: { plan: 'free' } }));
+        render(<EntitlementProvider><ProbeResumable /></EntitlementProvider>);
+        expect(await screen.findByText('resumable:false')).toBeInTheDocument();
     });
 });

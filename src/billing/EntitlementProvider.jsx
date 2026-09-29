@@ -2,7 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { useAuth } from '../auth/AuthProvider';
 import UpgradeModal from './UpgradeModal';
 
-const FREE = { plan: 'free', source: null, until: null, status: null, cancelAtPeriodEnd: false, manageUrl: null, priceLabel: '' };
+const FREE = { plan: 'free', source: null, until: null, status: null, cancelAtPeriodEnd: false, manageUrl: null, priceLabel: '', resumable: false };
 const noop = async () => ({ ok: false });
 // Backoff schedule for retrying while entitlement is still unknown (no successful response yet):
 // 2s, 5s, 15s, then every 30s until one succeeds.

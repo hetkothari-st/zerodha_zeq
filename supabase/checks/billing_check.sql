@@ -9,7 +9,9 @@ insert into auth.users (id, email, aud, role, raw_app_meta_data, raw_user_meta_d
     ('00000000-0000-4000-8000-0000000000a6', 'lapsed@example.com', 'authenticated', 'authenticated', '{"provider":"email"}', '{}'),
     ('00000000-0000-4000-8000-0000000000a7', 'cxl-in@example.com', 'authenticated', 'authenticated', '{"provider":"email"}', '{}'),
     ('00000000-0000-4000-8000-0000000000a8', 'cxl-out@example.com','authenticated', 'authenticated', '{"provider":"email"}', '{}'),
-    ('00000000-0000-4000-8000-0000000000a9', 'halted@example.com', 'authenticated', 'authenticated', '{"provider":"email"}', '{}');
+    ('00000000-0000-4000-8000-0000000000a9', 'halted@example.com', 'authenticated', 'authenticated', '{"provider":"email"}', '{}'),
+    ('00000000-0000-4000-8000-0000000000aa', 'resume@example.com', 'authenticated', 'authenticated', '{"provider":"email"}', '{}'),
+    ('00000000-0000-4000-8000-0000000000ab', 'resume-boundary@example.com', 'authenticated', 'authenticated', '{"provider":"email"}', '{}');
 
 update public.profiles set role = 'admin' where id = '00000000-0000-4000-8000-0000000000a2';
 update public.profiles set comp_pro = true where id = '00000000-0000-4000-8000-0000000000a3';
@@ -22,6 +24,20 @@ insert into public.subscriptions (user_id, razorpay_subscription_id, status, cur
     ('00000000-0000-4000-8000-0000000000a8', 'sub_cxl_out','cancelled', now() - interval '1 hour'),
     ('00000000-0000-4000-8000-0000000000a9', 'sub_halted', 'halted',    now() + interval '5 days');
 
+-- cancel_at_cycle_end keeps this row 'active' with cancel_at_period_end=true until the paid
+-- period ends: still Pro/subscription, and this is the state "Resume Pro" acts on.
+insert into public.subscriptions (user_id, razorpay_subscription_id, status, current_end, cancel_at_period_end) values
+    ('00000000-0000-4000-8000-0000000000aa', 'sub_scheduled_cancel', 'active', now() + interval '10 days', true);
+
+-- I2: the boundary case a resumed row's pre-filled current_end exists to cover. The OLD row has
+-- already actually transitioned to 'cancelled' (terminal, past its current_end — the real
+-- post-cancellation webhook already landed) while the NEW (resumed) row is 'authenticated' with
+-- current_end pre-filled to what was the old row's current_end. Entitlement must come from the
+-- new row alone, with no gap: pro/subscription.
+insert into public.subscriptions (user_id, razorpay_subscription_id, status, current_end, cancel_at_period_end) values
+    ('00000000-0000-4000-8000-0000000000ab', 'sub_boundary_old', 'cancelled',     now() - interval '1 day', false),
+    ('00000000-0000-4000-8000-0000000000ab', 'sub_boundary_new', 'authenticated', now() + interval '1 day', false);
+
 do $$
 declare
     expected text[][] := array[
@@ -33,7 +49,9 @@ declare
         ['00000000-0000-4000-8000-0000000000a6', 'free', ''],
         ['00000000-0000-4000-8000-0000000000a7', 'pro',  'subscription'],
         ['00000000-0000-4000-8000-0000000000a8', 'free', ''],
-        ['00000000-0000-4000-8000-0000000000a9', 'free', '']
+        ['00000000-0000-4000-8000-0000000000a9', 'free', ''],
+        ['00000000-0000-4000-8000-0000000000aa', 'pro',  'subscription'],
+        ['00000000-0000-4000-8000-0000000000ab', 'pro',  'subscription']
     ];
     r record;
     i int;
@@ -62,6 +80,32 @@ end $$;
 -- A new subscription is allowed once the old one is terminal.
 insert into public.subscriptions (user_id, razorpay_subscription_id, status)
 values ('00000000-0000-4000-8000-0000000000a9', 'sub_after_halt', 'created');
+
+-- Resume Pro after cancelling: a new 'created' row is allowed alongside a scheduled-cancel
+-- ('active', cancel_at_period_end=true) row for the same user (the resume migration's whole point).
+do $$
+begin
+    begin
+        insert into public.subscriptions (user_id, razorpay_subscription_id, status)
+        values ('00000000-0000-4000-8000-0000000000aa', 'sub_resume', 'created');
+        raise notice 'ok: resume subscription allowed alongside a scheduled-cancel row';
+    exception when unique_violation then
+        raise exception 'FAIL: resume subscription blocked by a scheduled-cancel row';
+    end;
+end $$;
+
+-- But a second non-cancelling open row is still rejected (the resumed 'created' row itself
+-- is subject to the same one-open-per-user rule as any other open subscription).
+do $$
+begin
+    begin
+        insert into public.subscriptions (user_id, razorpay_subscription_id, status)
+        values ('00000000-0000-4000-8000-0000000000aa', 'sub_resume_dupe', 'created');
+        raise exception 'FAIL: second non-cancelling open subscription was allowed';
+    exception when unique_violation then
+        raise notice 'ok: second non-cancelling open subscription still rejected';
+    end;
+end $$;
 
 -- Audit log accepts the comp actions.
 insert into public.admin_audit_log (admin_id, target_id, action)

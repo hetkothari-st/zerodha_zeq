@@ -34,11 +34,19 @@ export function createRazorpay({ keyId, keySecret, fetchImpl = fetch, timeoutMs 
     }
 
     return {
-        createSubscription: ({ planId, userId }) => call('/subscriptions', {
+        // startAt (unix seconds): when resuming after a cancel, the new subscription must not
+        // start (or charge) until the old paid period actually ends.
+        createSubscription: ({ planId, userId, startAt }) => call('/subscriptions', {
             method: 'POST',
-            body: { plan_id: planId, total_count: TOTAL_COUNT, customer_notify: 1, notes: { user_id: userId } },
+            body: {
+                plan_id: planId, total_count: TOTAL_COUNT, customer_notify: 1, notes: { user_id: userId },
+                ...(startAt ? { start_at: startAt } : {}),
+            },
         }),
-        cancelSubscription: (id) => call(`/subscriptions/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: { cancel_at_cycle_end: 1 } }),
+        // atCycleEnd=false (cancel_at_cycle_end: 0) cancels immediately — used for a resumed
+        // subscription that hasn't actually started billing yet, where "at cycle end" is
+        // meaningless (there is no cycle running); atCycleEnd=true (default) is the normal case.
+        cancelSubscription: (id, { atCycleEnd = true } = {}) => call(`/subscriptions/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: { cancel_at_cycle_end: atCycleEnd ? 1 : 0 } }),
         fetchSubscription: (id) => call(`/subscriptions/${encodeURIComponent(id)}`),
     };
 }

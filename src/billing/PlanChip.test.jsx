@@ -46,10 +46,19 @@ describe('PlanChip', () => {
         expect(ent.refresh).toHaveBeenCalled();
     });
     it('Cancelled: shows "Pro until" and no cancel button', async () => {
-        renderChip({ isPro: true, plan: 'pro', source: 'subscription', until: '2026-10-28T00:00:00.000Z', status: 'active', cancelAtPeriodEnd: true });
+        renderChip({ isPro: true, plan: 'pro', source: 'subscription', until: '2026-10-28T00:00:00.000Z', status: 'active', cancelAtPeriodEnd: true, resumable: false });
         await userEvent.click(screen.getByRole('button', { name: 'Pro' }));
         expect(screen.getByText(/Pro until 28 Oct 2026/)).toBeInTheDocument();
         expect(screen.queryByRole('button', { name: 'Cancel subscription' })).toBeNull();
+        expect(screen.queryByRole('button', { name: 'Resume Pro' })).toBeNull();
+    });
+    it('Cancelled + resumable: shows "Cancelled. Pro until" and a Resume Pro button that closes the modal and opens upgrade', async () => {
+        const ent = renderChip({ isPro: true, plan: 'pro', source: 'subscription', until: '2026-10-28T00:00:00.000Z', status: 'active', cancelAtPeriodEnd: true, resumable: true });
+        await userEvent.click(screen.getByRole('button', { name: 'Pro' }));
+        expect(screen.getByText(/Cancelled\. Pro until 28 Oct 2026\./)).toBeInTheDocument();
+        await userEvent.click(screen.getByRole('button', { name: 'Resume Pro' }));
+        expect(ent.openUpgrade).toHaveBeenCalled();
+        expect(screen.queryByRole('dialog', { name: 'Billing' })).toBeNull();
     });
     it('Cancel failure shows the message', async () => {
         apiFetch.mockResolvedValueOnce({ ok: false, message: 'Payments unavailable, try later.' });

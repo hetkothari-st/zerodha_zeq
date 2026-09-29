@@ -5,10 +5,19 @@ import { useEntitlement } from './EntitlementProvider';
 import { loadCheckout, openCheckout } from './razorpayCheckout';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const fmt = (iso) => (iso ? new Date(iso).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '');
+// True once the poll target is a real, live subscription — a first-time upgrade, or (for a
+// resume) the NEW subscription specifically, not the old cancel-scheduled one still showing Pro.
+const isLiveSubscription = (data) => Boolean(data?.plan === 'pro' && ['authenticated', 'active'].includes(data?.status) && !data?.cancelAtPeriodEnd);
 
 export default function UpgradeModal({ onClose, pollIntervalMs = 2000, pollTimeoutMs = 30000, checkout = { loadCheckout, openCheckout } }) {
     const { apiFetch, profile } = useAuth();
-    const { priceLabel, refresh } = useEntitlement();
+    const ent = useEntitlement();
+    const { priceLabel, refresh } = ent;
+    // Minor 3: captured once at mount, not re-derived every render — a poll resolving mid-flow
+    // (e.g. once the resumed subscription activates) must not flip the button/copy underneath
+    // the user while they're still looking at (or acting on) this modal.
+    const [{ resuming, resumeUntil }] = useState(() => ({ resuming: Boolean(ent.cancelAtPeriodEnd && ent.resumable), resumeUntil: ent.until }));
     const c = theme.classes;
     const [phase, setPhase] = useState('idle'); // idle | starting | checkout | activating | success | timeout
     const [message, setMessage] = useState(null);
@@ -51,7 +60,7 @@ export default function UpgradeModal({ onClose, pollIntervalMs = 2000, pollTimeo
         while (alive.current && Date.now() < deadline) {
             const s = await refresh();
             if (!alive.current) return;
-            if (s?.ok && s.data?.plan === 'pro') { setPhase('success'); return; }
+            if (s?.ok && isLiveSubscription(s.data)) { setPhase('success'); return; }
             await sleep(pollIntervalMs);
         }
         if (alive.current) setPhase('timeout');
@@ -79,10 +88,14 @@ export default function UpgradeModal({ onClose, pollIntervalMs = 2000, pollTimeo
                     <button type="button" className={c.primary} onClick={onClose}>Done</button>
                 ) : (
                     <button type="button" className={c.primary} onClick={pay} disabled={busy}>
-                        {busy ? 'Please wait…' : 'Upgrade to Pro'}
+                        {busy ? 'Please wait…' : resuming ? 'Resume Pro' : 'Upgrade to Pro'}
                     </button>
                 )}
-                <p className={c.muted}>Renews monthly via UPI AutoPay or card. Cancel anytime; Pro stays until the period ends.</p>
+                {resuming ? (
+                    <p className={c.muted}>No subscription charge until {fmt(resumeUntil)}; renews monthly after that.</p>
+                ) : (
+                    <p className={c.muted}>Renews monthly via UPI AutoPay or card. Cancel anytime; Pro stays until the period ends.</p>
+                )}
             </div>
         </div>
     );

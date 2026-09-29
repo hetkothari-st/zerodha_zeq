@@ -8,7 +8,13 @@ import UpgradeModal from './UpgradeModal';
 const apiFetch = vi.fn();
 vi.mock('../auth/AuthProvider', () => ({ useAuth: () => ({ apiFetch, profile: { full_name: 'Asha', email: 'a@x.in' } }) }));
 
-function setup({ subscribe = { ok: true, data: { subscriptionId: 'sub_1', keyId: 'k' } }, outcome = { outcome: 'paid' }, statuses = [{ ok: true, data: { plan: 'pro' } }], loadFails = false } = {}) {
+function setup({
+    subscribe = { ok: true, data: { subscriptionId: 'sub_1', keyId: 'k' } },
+    outcome = { outcome: 'paid' },
+    statuses = [{ ok: true, data: { plan: 'pro', status: 'active', cancelAtPeriodEnd: false } }],
+    loadFails = false,
+    entitlement = { isPro: false, priceLabel: '₹499/month' },
+} = {}) {
     apiFetch.mockReset();
     apiFetch.mockImplementation(async () => subscribe);
     const refresh = vi.fn(async () => statuses.shift() ?? { ok: true, data: { plan: 'free' } });
@@ -18,7 +24,7 @@ function setup({ subscribe = { ok: true, data: { subscriptionId: 'sub_1', keyId:
     };
     const onClose = vi.fn();
     const utils = render(
-        <EntitlementContext.Provider value={{ isPro: false, priceLabel: '₹499/month', refresh }}>
+        <EntitlementContext.Provider value={{ ...entitlement, refresh }}>
             <UpgradeModal onClose={onClose} checkout={checkout} pollIntervalMs={1} pollTimeoutMs={30} />
         </EntitlementContext.Provider>,
     );
@@ -79,5 +85,50 @@ describe('UpgradeModal', () => {
         const { onClose } = setup();
         await userEvent.click(screen.getByRole('button', { name: 'Close' }));
         expect(onClose).toHaveBeenCalled();
+    });
+    it('resumable Pro: button reads "Resume Pro" with a no-charge-until note', () => {
+        setup({ entitlement: { isPro: true, priceLabel: '₹499/month', cancelAtPeriodEnd: true, resumable: true, until: '2026-10-28T00:00:00.000Z' } });
+        expect(screen.getByRole('button', { name: 'Resume Pro' })).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Upgrade to Pro' })).toBeNull();
+        expect(screen.getByText(/No subscription charge until 28 Oct 2026; renews monthly after that\./)).toBeInTheDocument();
+    });
+    it('Minor 3: "resuming" is captured once at mount — an entitlement change mid-flow does not flip the button/copy', () => {
+        const refresh = vi.fn(async () => ({ ok: true, data: { plan: 'pro' } }));
+        const checkout = { loadCheckout: vi.fn(async () => function R() {}), openCheckout: vi.fn(async () => ({ outcome: 'paid' })) };
+        const { rerender } = render(
+            <EntitlementContext.Provider value={{ isPro: true, priceLabel: '₹499/month', cancelAtPeriodEnd: true, resumable: true, until: '2026-10-28T00:00:00.000Z', refresh }}>
+                <UpgradeModal onClose={vi.fn()} checkout={checkout} />
+            </EntitlementContext.Provider>,
+        );
+        expect(screen.getByRole('button', { name: 'Resume Pro' })).toBeInTheDocument();
+        // Simulate the entitlement context updating mid-flow (e.g. a poll resolving) to a
+        // non-resumable state — the modal's own "resuming" snapshot must not change underneath it.
+        rerender(
+            <EntitlementContext.Provider value={{ isPro: true, priceLabel: '₹499/month', cancelAtPeriodEnd: false, resumable: false, until: null, refresh }}>
+                <UpgradeModal onClose={vi.fn()} checkout={checkout} />
+            </EntitlementContext.Provider>,
+        );
+        expect(screen.getByRole('button', { name: 'Resume Pro' })).toBeInTheDocument();
+        expect(screen.getByText(/No subscription charge until 28 Oct 2026; renews monthly after that\./)).toBeInTheDocument();
+    });
+    it('resume: clicking Resume Pro drives the same subscribe → checkout → success flow', async () => {
+        const { checkout } = setup({ entitlement: { isPro: true, priceLabel: '₹499/month', cancelAtPeriodEnd: true, resumable: true, until: '2026-10-28T00:00:00.000Z' } });
+        await userEvent.click(screen.getByRole('button', { name: 'Resume Pro' }));
+        expect(await screen.findByText("You're on Pro. Enjoy!")).toBeInTheDocument();
+        expect(apiFetch).toHaveBeenCalledWith('/api/billing/subscribe', { method: 'POST' });
+        expect(checkout.openCheckout).toHaveBeenCalled();
+    });
+    it('success requires plan pro AND status authenticated/active AND not cancelAtPeriodEnd — a stale "still cancelling" poll does not count', async () => {
+        const localStatuses = [
+            { ok: true, data: { plan: 'pro', status: 'active', cancelAtPeriodEnd: true } }, // the OLD, still-cancelling subscription
+            { ok: true, data: { plan: 'pro', status: 'active', cancelAtPeriodEnd: false } }, // the NEW (resumed) one is now live
+        ];
+        setup({
+            entitlement: { isPro: true, priceLabel: '₹499/month', cancelAtPeriodEnd: true, resumable: true, until: '2026-10-28T00:00:00.000Z' },
+            statuses: localStatuses,
+        });
+        await userEvent.click(screen.getByRole('button', { name: 'Resume Pro' }));
+        expect(await screen.findByText("You're on Pro. Enjoy!")).toBeInTheDocument();
+        expect(localStatuses.length).toBe(0); // both polls were consumed: the first was correctly rejected
     });
 });

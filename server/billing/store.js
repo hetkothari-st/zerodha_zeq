@@ -30,8 +30,25 @@ export function createBillingStore({ supabaseUrl, serviceKey, fetchImpl = fetch,
         async latestSubscription(userId) {
             return first(await call(`subscriptions?user_id=eq.${enc(userId)}&select=${SUB_FIELDS}&order=created_at.desc&limit=1`));
         },
+        // Rows scheduled to cancel (cancel_at_period_end=true) are excluded: they no longer
+        // block a new subscription from being created (see scheduledCancel below).
         async openSubscription(userId) {
-            return first(await call(`subscriptions?user_id=eq.${enc(userId)}&status=in.(${OPEN_STATUSES.join(',')})&select=${SUB_FIELDS}&limit=1`));
+            return first(await call(`subscriptions?user_id=eq.${enc(userId)}&status=in.(${OPEN_STATUSES.join(',')})&cancel_at_period_end=is.false&select=${SUB_FIELDS}&limit=1`));
+        },
+        // The open-status row that IS scheduled to cancel and has the latest (non-null)
+        // current_end: the user is still Pro (source 'subscription') off the back of it, but has
+        // undone nothing yet. Used to offer/serve "Resume Pro". A row with no current_end never
+        // actually granted access, so it's filtered out rather than potentially winning by
+        // created_at over one that does.
+        async scheduledCancel(userId) {
+            return first(await call(`subscriptions?user_id=eq.${enc(userId)}&status=in.(${OPEN_STATUSES.join(',')})&cancel_at_period_end=is.true&current_end=not.is.null&select=${SUB_FIELDS}&order=current_end.desc&limit=1`));
+        },
+        // All open-status rows for a user (both non-cancelling and scheduled-to-cancel), newest
+        // first, in one round trip — callers that need both openSubscription- and
+        // scheduledCancel-equivalent rows (e.g. the status route) derive them from this instead
+        // of two separate queries.
+        async openRows(userId) {
+            return (await call(`subscriptions?user_id=eq.${enc(userId)}&status=in.(${OPEN_STATUSES.join(',')})&select=${SUB_FIELDS}&order=created_at.desc`)) ?? [];
         },
         async getSubscription(subId) {
             return first(await call(`subscriptions?razorpay_subscription_id=eq.${enc(subId)}&select=${SUB_FIELDS}`));

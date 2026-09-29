@@ -43,6 +43,7 @@ function BillingModal({ onClose }) {
         await ent.refresh();
     }
 
+    const canResume = ent.cancelAtPeriodEnd && ent.resumable;
     let body;
     if (ent.source === 'comp') body = <p>Pro (complimentary)</p>;
     else if (ent.source === 'admin') body = <p>Pro (admin)</p>;
@@ -50,6 +51,12 @@ function BillingModal({ onClose }) {
     else body = <p>Renews on {fmt(ent.until)}.</p>;
 
     const canCancel = ent.source === 'subscription' && !ent.cancelAtPeriodEnd;
+
+    function resume() {
+        onClose();
+        ent.openUpgrade();
+    }
+
     return (
         <div className={c.modal} role="dialog" aria-modal="true" aria-labelledby="billing-title">
             <div className={c.modalCard}>
@@ -59,6 +66,9 @@ function BillingModal({ onClose }) {
                 </div>
                 {body}
                 {error && <div role="alert" className={c.error}>{error}</div>}
+                {canResume && (
+                    <button type="button" className={c.primary} onClick={resume}>Resume Pro</button>
+                )}
                 {canCancel && !confirming && (
                     <button type="button" className={c.secondary} onClick={() => setConfirming(true)}>Cancel subscription</button>
                 )}

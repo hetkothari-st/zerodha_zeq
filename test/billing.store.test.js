@@ -22,11 +22,47 @@ test('entitlement calls the rpc and defaults to free', async () => {
     assert.deepEqual(await empty.store.entitlement('u1'), { plan: 'free', source: null, until: null });
 });
 
-test('openSubscription filters on open statuses', async () => {
+test('openSubscription filters on open statuses and excludes scheduled cancellations', async () => {
     const { calls, store } = rest(() => ({ body: [{ razorpay_subscription_id: 'sub_1', status: 'created' }] }));
     assert.equal((await store.openSubscription('u1')).razorpay_subscription_id, 'sub_1');
     assert.match(calls[0].url, /user_id=eq\.u1/);
     assert.match(calls[0].url, /status=in\.\(created,authenticated,active,pending\)/);
+    assert.match(calls[0].url, /cancel_at_period_end=is\.false/);
+});
+
+test('scheduledCancel returns the open row flagged cancel_at_period_end (excludes rows with no current_end)', async () => {
+    const { calls, store } = rest(() => ({ body: [{ razorpay_subscription_id: 'sub_old', status: 'active', cancel_at_period_end: true, current_end: '2026-11-01T00:00:00.000Z' }] }));
+    assert.equal((await store.scheduledCancel('u1')).razorpay_subscription_id, 'sub_old');
+    assert.match(calls[0].url, /user_id=eq\.u1/);
+    assert.match(calls[0].url, /status=in\.\(created,authenticated,active,pending\)/);
+    assert.match(calls[0].url, /cancel_at_period_end=is\.true/);
+});
+
+// I3: a stale/dud scheduled row with no current_end (never actually granted access) must never
+// win over a real one — filter it out server-side and order by current_end (not created_at), so
+// the row that grants access the longest (the one Resume should key off of) is the one returned.
+test('scheduledCancel filters out rows with null current_end and orders by current_end desc', async () => {
+    const { calls, store } = rest(() => ({ body: [{ razorpay_subscription_id: 'sub_latest', status: 'active', cancel_at_period_end: true, current_end: '2026-11-01T00:00:00.000Z' }] }));
+    assert.equal((await store.scheduledCancel('u1')).razorpay_subscription_id, 'sub_latest');
+    assert.match(calls[0].url, /current_end=not\.is\.null/);
+    assert.match(calls[0].url, /order=current_end\.desc/);
+    assert.ok(!calls[0].url.includes('created_at.desc'));
+});
+
+test('openRows returns every open-status row for a user, newest first, with no cancel_at_period_end filter or limit', async () => {
+    const { calls, store } = rest(() => ({ body: [{ razorpay_subscription_id: 'sub_a' }, { razorpay_subscription_id: 'sub_b' }] }));
+    const rows = await store.openRows('u1');
+    assert.equal(rows.length, 2);
+    assert.match(calls[0].url, /user_id=eq\.u1/);
+    assert.match(calls[0].url, /status=in\.\(created,authenticated,active,pending\)/);
+    assert.match(calls[0].url, /order=created_at\.desc/);
+    assert.ok(!calls[0].url.includes('cancel_at_period_end=is')); // no filter on it — select= listing it is fine
+    assert.ok(!calls[0].url.includes('limit='));
+});
+
+test('openRows returns [] (not null) when there are no rows', async () => {
+    const { store } = rest(() => ({ body: [] }));
+    assert.deepEqual(await store.openRows('u1'), []);
 });
 
 test('recordEvent: true when inserted, false on duplicate', async () => {

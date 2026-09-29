@@ -25,6 +25,7 @@ editor, once per project.
 - Sign up a fresh user → Free locks visible → Upgrade → pay with Razorpay test UPI `success@razorpay`
   or test card → modal shows "You're on Pro" within ~30 s → locks gone.
 - Account chip → Billing → Cancel → "Pro until <date>".
+- Cancel then Resume Pro → Razorpay asks for a new mandate; no charge until the old period ends.
 - Webhook deliveries: Razorpay dashboard → Webhooks → the endpoint → recent deliveries should be 200.
 
 ## Go live
